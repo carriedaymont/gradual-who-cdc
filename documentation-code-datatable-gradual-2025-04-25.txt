@@ -1,0 +1,3440 @@
+*2025-04-25
+
+*twosmooth GitHub percentiles 2025-04-25
+
+**Code to generate percentile tables/charts for gradually transitioned charts.
+
+
+/*
+
+This code was used for plotting percentile charts and providing percentile tables. It is annotated to variable degrees in different sections. 
+
+Consistent with CDC recommendations, we provide the following percentiles: 5, 10, 25, 50, 75, 90, 95.
+We will also provide +/- 1 and 2 z-scores (+/-2 are rounded to 2nd and 98th on CDC printed charts) as well as the 0.1/99.9 percentiles (which are very similar to z-scores of -3/+3).
+
+Because differences can arise with rounding, we provide percentiles provided by WHO and CDC when possible rather than converting from z-scores.
+
+Data sources: files obtained 2024-10-22.
+-WHO - "Expanded tables for constructing national health cards" from WHO growth standards website
+	--Changed sheet names for zscore tables
+	--Changed age variable all to Age (some were Day)
+-CDC - Weight and length/height data files and extended BMI data file from cdc.gov NCHS website 
+
+
+When using age in days, last day of WHO is 730, gradual is from 731-1825 days first day of CDC is 1826
+(At 730 days, age is slightly <2 years when calculated by agedays/365.25. This gives CDC z-score a negative weight at 730 days.)
+
+The only data used here are publicly available (hence storage on Dropbox). This document does not include code for the analysis of health system data.
+*/
+
+
+
+*Directory and version
+/*
+
+*Change to directory in which to store completed files
+cd "/Users/carriedaymont/Dropbox/Dropbox Documents/Research/__twosmooth/_Percentile Tables"
+
+*One aspect of code does not work with versions later than 15
+version 15
+
+*/
+
+
+
+******				Import and set up WHO data files
+
+/*
+clear
+
+*Import and save to .dta
+foreach p in wfa lhfa bfa  {
+	*Boys - importing boys and girls separately so easier to switch name to m/f
+	foreach s in boys {
+		*Percentiles and z-scores
+		foreach t in percentiles {
+			clear
+			import excel "/Users/carriedaymont/Dropbox/Dropbox Documents/Research/__twosmooth/_Percentile Tables/Original Data Files/who-`p'-`s'-`t'-expanded-tables.xlsx", sheet("`p'_`s'_p_exp") firstrow case(lower) clear
+			rename age agedays
+			drop l m s
+			rename p* who_`s'_`p'_p*
+			save who_m_`p'_perc, replace
+		}
+		*Percentiles and z-scores
+		foreach t in zscore {
+			clear
+			import excel "/Users/carriedaymont/Dropbox/Dropbox Documents/Research/__twosmooth/_Percentile Tables/Original Data Files/who-`p'-`s'-`t'-expanded-tables.xlsx", sheet("`p'_`s'_z_exp") firstrow case(lower) clear
+			rename age agedays
+			rename l who_`s'_`p'_l
+			rename m who_`s'_`p'_m
+			rename s who_`s'_`p'_s
+			rename sd* who_`s'_`p'_sd*
+			save who_m_`p'_z, replace
+		}
+	}
+	*Girls
+	foreach s in girls {
+		*Percentiles and z-scores
+		foreach t in percentiles {
+			clear
+			import excel "/Users/carriedaymont/Dropbox/Dropbox Documents/Research/__twosmooth/_Percentile Tables/Original Data Files/who-`p'-`s'-`t'-expanded-tables.xlsx", sheet("`p'_`s'_p_exp") firstrow case(lower) clear
+			rename age agedays
+			drop l m s
+			rename p* who_`s'_`p'_p*
+			save who_f_`p'_perc, replace
+		}
+		*Percentiles and z-scores
+		foreach t in zscore {
+			clear
+			import excel "/Users/carriedaymont/Dropbox/Dropbox Documents/Research/__twosmooth/_Percentile Tables/Original Data Files/who-`p'-`s'-`t'-expanded-tables.xlsx", sheet("`p'_`s'_z_exp") firstrow case(lower) clear
+			rename age agedays
+			rename l who_`s'_`p'_l
+			rename m who_`s'_`p'_m
+			rename s who_`s'_`p'_s
+			rename sd* who_`s'_`p'_sd*
+			save who_f_`p'_z, replace
+		}
+	}
+}
+
+*Merge WHO datasets
+use who_m_wfa_perc, clear
+sort agedays
+merge 1:1 agedays using who_f_wfa_perc, nogen
+*Rest of percentiles
+foreach p in lhfa bfa {
+	foreach s in m f {
+		merge 1:1 agedays using who_`s'_`p'_perc, nogen
+	}
+}
+*Z-scores for all
+foreach p in wfa lhfa bfa {
+	foreach s in m f {
+		merge 1:1 agedays using who_`s'_`p'_z, nogen
+	}
+}
+
+*Replace boys/girls with m/f
+rename *boys* *m*
+rename *girls* *f*
+
+*Rename to my parameter abbreviations
+
+rename *wfa* *wt*
+rename *lhfa* *ht*
+rename *bfa* *bmi*
+rename *_sd* *_z*
+
+*Drop lower z-scores
+drop *_z4neg *_z3neg
+
+*Save WHO days file
+save gh_percentiles_who_days, replace
+
+
+
+***For WHO month table, use value from closest age
+***At 24 months, use 730 days
+
+
+******				WHO Month files
+
+use gh_percentiles_who_days, replace
+
+*Create variable for agemonth
+gen agemonths=agedays/365.25*12
+*Round to nearest half-month
+gen ragemonths=round(agemonths, 0.5)
+
+*Absolute value of difference between agemonths and ragemonths
+gen absdiffr=abs(agemonths-ragemonths)
+
+*Identify smallest difference for each half-month
+sort ragemonths absdiffr
+by ragemonths: gen keep=_n
+replace keep=. if keep!=1
+
+*Check agedays of value at 24m
+list agedays if ragemonths==24 & keep==1
+*It's 731
+replace keep=. if agedays==731
+replace keep=1 if agedays==730
+
+*Only keep if going to use for months table
+keep if keep==1
+
+drop agemonths absdiffr keep
+rename ragemonths agemonths
+order agemonths
+
+
+*Save WHO Months file
+save gh_percentiles_who_months, replace
+
+
+*/
+******				Import and set up CDC data files
+
+
+	
+/*
+Getting data by day
+-CDC cubically interpolate selected percentiles and z-scores (e.g., -2, -2).
+	--Do separately for length and height, switch so that 730 days is height
+	--Do separately for weight infant and older weight, see if different result
+	--Use data through at least 63.5 months to ensure enough data for cubic interpolation at 1827 days.
+	--Convert agemonths to agedays - do not round. 
+	--Cubically interpolate each percentile or z-score to integer days
+	--Linearly interpolate when not 
+	
+Presenting data by month
+-Divide agedays by 30.4375
+-Choose integer day closest to 1st day of month
+-Make 730 days equal to 24 months 
+	-Except for BMI when 730.5 days will be equal to 24 months (and 730 days)
+-Make 1827 days equal to 60 months
+
+Smoothing
+-Days <=730 are WHO; >=731 to <=1825 are weighted average; >=1826 and after are CDC
+-Do not smooth separately for months, use values by day
+-Check that this corresponds to months <=24 WHO; >=24 to <60 are smoothed; >=60 and after are CDC
+
+*/
+
+
+
+***
+***First, for each parameter, import, format, and interpolate.
+***
+
+/*
+Getting data by day
+-CDC cubically interpolate selected percentiles and z-scores (e.g., -2, -2).
+	--Do separately for length and height, switch so that 730 days uses height because would switch to height on 2nd birthday and starting with BMI on 730 days -- gradual and height will switch on different days 
+	--For height and BMI, make value at 24 months (730.5 days) the value for 730 days, after interpolation
+	--Do separately for weight infant and older weight, use peds for >=731 days (no data at 730 days)
+	--Convert agemonths to agedays - do not round. 
+	--Cubically interpolate each percentile or z-score to integer days
+	--Linearly interpolate when not 
+	
+Also need to interpolate whole months
+
+Downloaded length dataset had extra row with second set of headings. Converted downloaded .csv files to .xls while trying to figure out difficulty with importing
+
+*/
+
+
+
+*Generate dataset with all integer agedays to 20 years
+/*
+
+clear
+set obs 7306
+gen agedays=_n-1
+save agedays_blank, replace
+
+*Generate dataset with all integer agemonths from 1m to 20 years (already includes 0 and 240)
+clear 
+set obs 239
+gen agemos=_n
+save agemos_blank, replace 
+
+*/
+
+
+*								Each parameter
+
+********							
+
+*Import and set-up datasets
+
+/*
+*BMI import
+foreach p in bmi-age-2022  {
+	clear
+	import delimited "/Users/carriedaymont/Dropbox/Dropbox Documents/Research/__twosmooth/_Percentile Tables/Original Data Files/cdc-`p'.csv", varnames(1) asdouble clear
+	
+	*Change to my sex coding (male=0, female=1) - their code is male==1, female==2
+	replace sex=sex - 1
+	
+	*Make new variables - separate for each sex
+	*Then get both sexes on same line and drop duplicate line
+	foreach v in l m s sigma p5 p10 p25 p50 p75 p85 p90 p95 p99 p99_9 p99_99 pct120ofp95 z2neg z1neg z0 z1 z2 z3 z4 z5 {
+		sort agemos sex
+		by agemos: gen cdc_m_bmi_`v'_orig = `v'[1]
+		by agemos: gen cdc_f_bmi_`v'_orig = `v'[2]
+		drop `v'
+	}	
+	drop if sex==1
+	drop sex
+	
+	save cdc_bmi_import, replace
+}
+
+*Length import
+foreach p in lenageinf  {
+	clear
+	
+	import excel "/Users/carriedaymont/Dropbox/Dropbox Documents/Research/__twosmooth/_Percentile Tables/Original Data Files/cdc-`p'.xls", firstrow case(lower) clear
+
+	*Remove extra row that was only in length dataset
+	drop if sex=="Sex"
+	*Destring 
+	foreach v in sex agemos l m s p3 p5 p10 p25 p50 p75 p90 p95 p97 {
+		destring `v', replace
+	}
+	
+	*Change to my sex coding - their code is male==1, female==2
+	replace sex=sex - 1
+	
+	*Make new variables - separate for each sex
+	*Then get both sexes on same line and drop duplicate line
+	foreach v in l m s p3 p5 p10 p25 p50 p75 p90 p95 p97 {
+		sort agemos sex
+		by agemos: gen cdc_m_len_`v'_orig = `v'[1]
+		by agemos: gen cdc_f_len_`v'_orig = `v'[2]
+		drop `v'
+	}
+	drop if sex==1
+	drop sex
+
+	save cdc_len_import, replace
+}
+
+
+*Stature import
+foreach p in statage  {
+	clear
+	import excel "/Users/carriedaymont/Dropbox/Dropbox Documents/Research/__twosmooth/_Percentile Tables/Original Data Files/cdc-`p'.xls", firstrow case(lower) clear
+
+	*Change to my sex coding - their code is male==1, female==2
+	replace sex=sex - 1
+	
+	*Make new variables - separate for each sex
+	*Then get both sexes on same line and drop duplicate line
+	foreach v in l m s p3 p5 p10 p25 p50 p75 p90 p95 p97 {
+		sort agemos sex
+		by agemos: gen cdc_m_stat_`v'_orig = `v'[1]
+		by agemos: gen cdc_f_stat_`v'_orig = `v'[2]
+		drop `v'
+	}
+	drop if sex==1
+	drop sex
+	
+	save cdc_stat_import, replace
+}
+
+
+*weight (infant) import
+
+foreach p in wtageinf  {
+	clear
+	import excel "/Users/carriedaymont/Dropbox/Dropbox Documents/Research/__twosmooth/_Percentile Tables/Original Data Files/cdc-`p'.xls", firstrow case(lower) clear
+
+	*Change to my sex coding - their code is male==1, female==2
+	replace sex=sex - 1
+	
+	*Make new variables - separate for each sex
+	*Then get both sexes on same line and drop duplicate line
+	foreach v in l m s p3 p5 p10 p25 p50 p75 p90 p95 p97 {
+		sort agemos sex
+		by agemos: gen cdc_m_wtinf_`v'_orig = `v'[1]
+		by agemos: gen cdc_f_wtinf_`v'_orig = `v'[2]
+		drop `v'
+	}
+	drop if sex==1
+	drop sex
+	
+	save cdc_wtinf_import, replace
+
+}
+
+
+*Weight (ped) import
+
+foreach p in wtage  {
+	clear
+	import excel "/Users/carriedaymont/Dropbox/Dropbox Documents/Research/__twosmooth/_Percentile Tables/Original Data Files/cdc-`p'.xls", firstrow case(lower) clear
+
+	*Drop row with missing values
+	drop if sex==.
+	
+	*Change to my sex coding - their code is male==1, female==2
+	replace sex=sex - 1
+	
+	*Make new variables - separate for each sex
+	*Then get both sexes on same line and drop duplicate line
+	foreach v in l m s p3 p5 p10 p25 p50 p75 p90 p95 p97 {
+		sort agemos sex
+		by agemos: gen cdc_m_wtped_`v'_orig = `v'[1]
+		by agemos: gen cdc_f_wtped_`v'_orig = `v'[2]
+		drop `v'
+	}
+	drop if sex==1
+	drop sex
+	
+	save cdc_wtped_import, replace
+
+}
+
+
+
+*********Make day and month percentiles
+
+
+
+
+*BMI Day percentiles
+
+foreach p in bmi {
+	
+	use cdc_`p'_import, clear
+	
+	*Add agedays variable
+	gen agedays=agemos/12*365.25
+	
+	*Append with blank agedays list
+	append using agedays_blank
+	
+	drop p3 p98 z1_5neg z0_5neg z0_5 z1_5 z2_5 z3_5 z4_5
+	
+	*Interpolate to get values for every integer day
+	foreach s in m f {
+		foreach v in l m s sigma p5 p10 p25 p50 p75 p85 p90 p95 p99 p99_9 p99_99 pct120ofp95 z2neg z1neg z0 z1 z2 z3 z4 z5 {
+			sort agedays
+			*Cubic
+			cipolate cdc_`s'_`p'_`v'_orig agedays, gen(cdc_`s'_`p'_`v'_cip)
+			*Linear
+			ipolate cdc_`s'_`p'_`v'_orig agedays, gen(cdc_`s'_`p'_`v'_lip)
+			*Final variable
+			gen cdc_`s'_`p'_`v'=cdc_`s'_`p'_`v'_orig
+			replace cdc_`s'_`p'_`v'=cdc_`s'_`p'_`v'_cip if cdc_`s'_`p'_`v'==.
+			replace cdc_`s'_`p'_`v'=cdc_`s'_`p'_`v'_lip if cdc_`s'_`p'_`v'==.
+		}
+	}
+
+	
+	*For BMI and stature only, make 730 days = to 730.5
+	drop if agedays==730
+	replace agedays=int(730) if agedays==730.5
+	
+	*Drop non-integer agedays
+	gen modage=mod(agedays,1)
+	drop if modage!=0
+	
+	*Drop unneeded variables
+	drop *cip *lip *orig agemos modage
+	
+	*Drop unneeded ages
+	drop if agedays<730
+	
+	*Drop duplicates
+	duplicates drop
+	
+	*Sort
+	sort agedays
+	
+	save temp_cdc_`p'_days, replace
+}
+
+
+*BMI Month Percentiles
+
+
+foreach p in bmi {
+	
+	use cdc_`p'_import, clear
+
+	*Append with blank agemos list
+	append using agemos_blank
+	
+	drop p3 p98 z1_5neg z0_5neg z0_5 z1_5 z2_5 z3_5 z4_5
+
+	
+	*Interpolate to get values for every integer month
+	foreach s in m f {
+		foreach v in l m s sigma p5 p10 p25 p50 p75 p85 p90 p95 p99 p99_9 p99_99 pct120ofp95 z2neg z1neg z0 z1 z2 z3 z4 z5 {
+			sort agemos
+			*Cubic
+			cipolate cdc_`s'_`p'_`v'_orig agemos, gen(cdc_`s'_`p'_`v'_cip)
+			*Linear
+			ipolate cdc_`s'_`p'_`v'_orig agemos, gen(cdc_`s'_`p'_`v'_lip)
+			*Final variable
+			gen cdc_`s'_`p'_`v'=cdc_`s'_`p'_`v'_orig
+			replace cdc_`s'_`p'_`v'=cdc_`s'_`p'_`v'_cip if cdc_`s'_`p'_`v'==.
+			replace cdc_`s'_`p'_`v'=cdc_`s'_`p'_`v'_lip if cdc_`s'_`p'_`v'==.
+		}
+	}
+
+	
+	*Drop unneeded variables
+	drop *cip *lip *orig 
+		
+	*Drop extra ages
+	drop if agemos<24
+	
+	*Drop duplicates
+	duplicates drop
+	
+	*Sort
+	sort agemos
+	
+	save temp_cdc_`p'_months, replace
+}
+
+
+
+
+
+**************************************		Length
+
+
+
+
+
+*Length Day Percentiles
+
+
+foreach p in len {
+	
+	use cdc_`p'_import, clear
+		
+	*Add agedays variable
+	gen agedays=agemos/12*365.25
+		
+	*Append with blank agedays list
+	append using agedays_blank
+	
+	*Interpolation
+	foreach s in m f {
+		foreach v in l m s p3 p5 p10 p25 p50 p75 p90 p95 p97 {
+			sort agedays
+			*Cubic
+			cipolate cdc_`s'_`p'_`v'_orig agedays, gen(cdc_`s'_`p'_`v'_cip)
+			*Linear
+			ipolate cdc_`s'_`p'_`v'_orig agedays, gen(cdc_`s'_`p'_`v'_lip)
+			*Final variable
+			gen cdc_`s'_`p'_`v'=cdc_`s'_`p'_`v'_orig
+			replace cdc_`s'_`p'_`v'=cdc_`s'_`p'_`v'_cip if cdc_`s'_`p'_`v'==.
+			replace cdc_`s'_`p'_`v'=cdc_`s'_`p'_`v'_lip if cdc_`s'_`p'_`v'==.
+		}
+	}
+
+
+	*Drop non-integer agedays
+	gen modage=mod(agedays,1)
+	drop if modage!=0
+	
+	*Drop unneeded variables
+	drop *cip *lip *orig agemos modage
+		
+	*Drop extra ages for length
+	drop if agedays>729
+	
+	*Rename to facilitate appending
+	rename *len* *ht*
+	
+	save temp_cdc_`p'_days, replace
+}
+
+
+*Length Month Percentiles
+
+
+foreach p in len {
+	
+	use cdc_`p'_import, clear
+
+	*Append with blank agemos list
+	append using agemos_blank
+	
+	*Interpolate to get values for every integer month
+	foreach s in m f {
+		foreach v in l m s p3 p5 p10 p25 p50 p75 p90 p95 p97  {
+			sort agemos
+			*Cubic
+			cipolate cdc_`s'_`p'_`v'_orig agemos, gen(cdc_`s'_`p'_`v'_cip)
+			*Linear
+			ipolate cdc_`s'_`p'_`v'_orig agemos, gen(cdc_`s'_`p'_`v'_lip)
+			*Final variable
+			gen cdc_`s'_`p'_`v'=cdc_`s'_`p'_`v'_orig
+			replace cdc_`s'_`p'_`v'=cdc_`s'_`p'_`v'_cip if cdc_`s'_`p'_`v'==.
+			replace cdc_`s'_`p'_`v'=cdc_`s'_`p'_`v'_lip if cdc_`s'_`p'_`v'==.
+		}
+	}
+	
+	*Drop unneeded variables
+	drop *cip *lip *orig 
+	
+	*Drop duplicates
+	duplicates drop
+	
+	*Drop extra ages for length
+	drop if agemos>23.5
+	
+	*Sort
+	sort agemos
+	
+	*Rename to facilitate appending
+	rename *len* *ht*
+	
+	save temp_cdc_`p'_months, replace
+}
+
+
+
+
+************							Stature
+
+
+*Height Day Percentiles
+
+foreach p in stat {
+	
+	use cdc_`p'_import, clear
+		
+	*Add agedays variable
+	gen agedays=agemos/12*365.25
+		
+	*Append with blank agedays list
+	append using agedays_blank
+	
+	*Interpolation
+	foreach s in m f {
+		foreach v in l m s p3 p5 p10 p25 p50 p75 p90 p95 p97 {
+			sort agedays
+			*Cubic
+			cipolate cdc_`s'_`p'_`v'_orig agedays, gen(cdc_`s'_`p'_`v'_cip)
+			*Linear
+			ipolate cdc_`s'_`p'_`v'_orig agedays, gen(cdc_`s'_`p'_`v'_lip)
+			*Final variable
+			gen cdc_`s'_`p'_`v'=cdc_`s'_`p'_`v'_orig
+			replace cdc_`s'_`p'_`v'=cdc_`s'_`p'_`v'_cip if cdc_`s'_`p'_`v'==.
+			replace cdc_`s'_`p'_`v'=cdc_`s'_`p'_`v'_lip if cdc_`s'_`p'_`v'==.
+		}
+	}
+
+	*For BMI and stature only, make 730 days = to 730.5
+	drop if agedays==730
+	replace agedays=int(730) if agedays==730.5
+
+	*Drop non-integer agedays
+	gen modage=mod(agedays,1)
+	drop if modage!=0
+	
+	*Drop unneeded variables
+	drop *cip *lip *orig agemos modage
+	
+	*Drop extra ages for stature
+	drop if agedays<730
+	
+	*Rename to facilitate appending
+	rename *stat* *ht*
+	
+	save temp_cdc_`p'_days, replace
+}
+
+
+
+*Height Month Percentiles
+
+
+foreach p in stat {
+	
+	use cdc_`p'_import, clear
+
+	*Append with blank agemos list
+	append using agemos_blank
+	
+	*Interpolate to get values for every integer month
+	foreach s in m f {
+		foreach v in l m s p3 p5 p10 p25 p50 p75 p90 p95 p97  {
+			sort agemos
+			*Cubic
+			cipolate cdc_`s'_`p'_`v'_orig agemos, gen(cdc_`s'_`p'_`v'_cip)
+			*Linear
+			ipolate cdc_`s'_`p'_`v'_orig agemos, gen(cdc_`s'_`p'_`v'_lip)
+			*Final variable
+			gen cdc_`s'_`p'_`v'=cdc_`s'_`p'_`v'_orig
+			replace cdc_`s'_`p'_`v'=cdc_`s'_`p'_`v'_cip if cdc_`s'_`p'_`v'==.
+			replace cdc_`s'_`p'_`v'=cdc_`s'_`p'_`v'_lip if cdc_`s'_`p'_`v'==.
+		}
+	}
+	
+	*Drop unneeded variables
+	drop *cip *lip *orig 
+	
+	*Drop duplicates
+	duplicates drop
+	
+	*Drop extra ages for height
+	drop if agemos<24
+	
+	*Sort
+	sort agemos
+	
+	*Rename to facilitate appending
+	rename *stat* *ht*
+	
+	save temp_cdc_`p'_months, replace
+}
+
+
+
+***
+***							Combine length and height datasets
+***
+
+*Days first
+
+*Start with length
+use temp_cdc_len_days, clear
+
+*Append with stature
+append using temp_cdc_stat_days
+
+*Drop duplicates
+duplicates drop
+
+save temp_cdc_ht_days, replace
+
+
+*Months
+
+*Start with length
+use temp_cdc_len_months, clear
+
+*Append with stature
+append using temp_cdc_stat_months
+
+*Drop duplicates
+duplicates drop
+
+save temp_cdc_ht_months, replace
+
+
+
+**************************************		Weight
+
+
+*Infant weight Day Percentiles
+
+
+foreach p in wtinf {
+	
+	use cdc_`p'_import, clear
+		
+	*Add agedays variable
+	gen agedays=agemos/12*365.25
+		
+	*Append with blank agedays list
+	append using agedays_blank
+	
+	*Interpolation
+	foreach s in m f {
+		foreach v in l m s p3 p5 p10 p25 p50 p75 p90 p95 p97 {
+			sort agedays
+			*Cubic
+			cipolate cdc_`s'_`p'_`v'_orig agedays, gen(cdc_`s'_`p'_`v'_cip)
+			*Linear
+			ipolate cdc_`s'_`p'_`v'_orig agedays, gen(cdc_`s'_`p'_`v'_lip)
+			*Final variable
+			gen cdc_`s'_`p'_`v'=cdc_`s'_`p'_`v'_orig
+			replace cdc_`s'_`p'_`v'=cdc_`s'_`p'_`v'_cip if cdc_`s'_`p'_`v'==.
+			replace cdc_`s'_`p'_`v'=cdc_`s'_`p'_`v'_lip if cdc_`s'_`p'_`v'==.
+		}
+	}
+
+
+	*Drop non-integer agedays
+	gen modage=mod(agedays,1)
+	drop if modage!=0
+	
+	*Drop unneeded variables
+	drop *cip *lip *orig agemos modage
+		
+	*Drop extra ages for length
+	drop if agedays>729
+	
+	*Rename to facilitate appending
+	rename *wtinf* *wt*
+	
+	save temp_cdc_`p'_days, replace
+}
+
+
+*Infant weight month Percentiles
+
+
+foreach p in wtinf {
+	
+	use cdc_`p'_import, clear
+
+	*Append with blank agemos list
+	append using agemos_blank
+	
+	*Interpolate to get values for every integer month
+	foreach s in m f {
+		foreach v in l m s p3 p5 p10 p25 p50 p75 p90 p95 p97  {
+			sort agemos
+			*Cubic
+			cipolate cdc_`s'_`p'_`v'_orig agemos, gen(cdc_`s'_`p'_`v'_cip)
+			*Linear
+			ipolate cdc_`s'_`p'_`v'_orig agemos, gen(cdc_`s'_`p'_`v'_lip)
+			*Final variable
+			gen cdc_`s'_`p'_`v'=cdc_`s'_`p'_`v'_orig
+			replace cdc_`s'_`p'_`v'=cdc_`s'_`p'_`v'_cip if cdc_`s'_`p'_`v'==.
+			replace cdc_`s'_`p'_`v'=cdc_`s'_`p'_`v'_lip if cdc_`s'_`p'_`v'==.
+		}
+	}
+	
+	*Drop unneeded variables
+	drop *cip *lip *orig 
+	
+	*Drop duplicates
+	duplicates drop
+	
+	*Drop extra ages for length
+	drop if agemos>23.5
+	
+	*Sort
+	sort agemos
+	
+	*Rename to facilitate appending
+	rename *wtinf* *wt*
+	
+	save temp_cdc_`p'_months, replace
+}
+
+
+
+*Child weight Day Percentiles
+
+foreach p in wtped {
+	
+	use cdc_`p'_import, clear
+		
+	*Add agedays variable
+	gen agedays=agemos/12*365.25
+		
+	*Append with blank agedays list
+	append using agedays_blank
+	
+	*Interpolation
+	foreach s in m f {
+		foreach v in l m s p3 p5 p10 p25 p50 p75 p90 p95 p97 {
+			sort agedays
+			*Cubic
+			cipolate cdc_`s'_`p'_`v'_orig agedays, gen(cdc_`s'_`p'_`v'_cip)
+			*Linear
+			ipolate cdc_`s'_`p'_`v'_orig agedays, gen(cdc_`s'_`p'_`v'_lip)
+			*Final variable
+			gen cdc_`s'_`p'_`v'=cdc_`s'_`p'_`v'_orig
+			replace cdc_`s'_`p'_`v'=cdc_`s'_`p'_`v'_cip if cdc_`s'_`p'_`v'==.
+			replace cdc_`s'_`p'_`v'=cdc_`s'_`p'_`v'_lip if cdc_`s'_`p'_`v'==.
+		}
+	}
+
+	*For BMI and stature only, make 730 days = to 730.5
+	drop if agedays==730
+	replace agedays=int(730) if agedays==730.5
+
+	*Drop non-integer agedays
+	gen modage=mod(agedays,1)
+	drop if modage!=0
+	
+	*Drop unneeded variables
+	drop *cip *lip *orig agemos modage
+	
+	*Drop extra ages for stature
+	drop if agedays<730
+	
+	*Rename to facilitate appending
+	rename *wtped* *wt*
+	
+	save temp_cdc_`p'_days, replace
+}
+
+
+
+*Child Weight Month Percentiles
+
+
+foreach p in wtped {
+	
+	use cdc_`p'_import, clear
+
+	*Append with blank agemos list
+	append using agemos_blank
+	
+	*Interpolate to get values for every integer month
+	foreach s in m f {
+		foreach v in l m s p3 p5 p10 p25 p50 p75 p90 p95 p97  {
+			sort agemos
+			*Cubic
+			cipolate cdc_`s'_`p'_`v'_orig agemos, gen(cdc_`s'_`p'_`v'_cip)
+			*Linear
+			ipolate cdc_`s'_`p'_`v'_orig agemos, gen(cdc_`s'_`p'_`v'_lip)
+			*Final variable
+			gen cdc_`s'_`p'_`v'=cdc_`s'_`p'_`v'_orig
+			replace cdc_`s'_`p'_`v'=cdc_`s'_`p'_`v'_cip if cdc_`s'_`p'_`v'==.
+			replace cdc_`s'_`p'_`v'=cdc_`s'_`p'_`v'_lip if cdc_`s'_`p'_`v'==.
+		}
+	}
+	
+	*Drop unneeded variables
+	drop *cip *lip *orig 
+	
+	*Drop duplicates
+	duplicates drop
+	
+	*Drop extra ages for height
+	drop if agemos<24
+	
+	*Sort
+	sort agemos
+	
+	*Rename to facilitate appending
+	rename *wtped* *wt*
+	
+	save temp_cdc_`p'_months, replace
+}
+
+
+
+***
+***							Combine weight datasets
+***
+
+*Days first
+
+*Start with length
+use temp_cdc_wtinf_days, clear
+
+*Append with stature
+append using temp_cdc_wtped_days
+
+*Drop duplicates
+duplicates drop
+
+save temp_cdc_wt_days, replace
+
+
+*Months
+
+*Start with length
+use temp_cdc_wtinf_months, clear
+
+*Append with stature
+append using temp_cdc_wtped_months
+
+*Drop duplicates
+duplicates drop
+
+save temp_cdc_wt_months, replace
+
+*/
+
+***
+***								All gradual parameters into 1 file - CDC from 0-20 years
+***
+
+
+*CDC 0-20 Days File
+
+/*
+use temp_cdc_wt_days, clear
+
+merge 1:1 agedays using temp_cdc_ht_days, nogen
+
+merge 1:1 agedays using temp_cdc_bmi_days, nogen
+
+*Add +/- 1 and 2 z-scores for wt and ht, as well as for 0 (same as m)
+foreach c in cdc {
+	foreach s in m f {
+		foreach p in wt ht {
+			foreach n in 1 2 {
+				gen `c'_`s'_`p'_z`n'=`c'_`s'_`p'_m * (1 + (`c'_`s'_`p'_l*`c'_`s'_`p'_s*`n'))^(1/`c'_`s'_`p'_l)
+				gen `c'_`s'_`p'_z`n'neg=`c'_`s'_`p'_m * (1 + (`c'_`s'_`p'_l*`c'_`s'_`p'_s*-`n'))^(1/`c'_`s'_`p'_l)
+			}		
+			gen `c'_`s'_`p'_z0=`c'_`s'_`p'_m		
+		}
+	}
+}
+
+save gh_percentiles_cdc_days, replace
+*/
+
+*CDC 0-20 Months File
+
+/*
+use temp_cdc_wt_months, clear
+
+merge 1:1 agemos using temp_cdc_ht_months, nogen
+
+merge 1:1 agemos using temp_cdc_bmi_months, nogen
+
+*Rename agemonths
+rename agemos agemonths
+
+*Add +/- 1 and 2 z-scores for wt and ht, as well as for 0 (same as m)
+foreach c in cdc {
+	foreach s in m f {
+		foreach p in wt ht {
+			foreach n in 1 2 {
+				gen `c'_`s'_`p'_z`n'=`c'_`s'_`p'_m * (1 + (`c'_`s'_`p'_l*`c'_`s'_`p'_s*`n'))^(1/`c'_`s'_`p'_l)
+				gen `c'_`s'_`p'_z`n'neg=`c'_`s'_`p'_m * (1 + (`c'_`s'_`p'_l*`c'_`s'_`p'_s*-`n'))^(1/`c'_`s'_`p'_l)
+			}		
+			gen `c'_`s'_`p'_z0=`c'_`s'_`p'_m		
+		}
+	}
+}
+
+save gh_percentiles_cdc_months, replace
+
+*/
+
+**************				Make gradual percentiles/z-scores by day
+
+******     This is GitHub file for days									********
+
+/*
+use gh_percentiles_who_days, clear
+merge 1:1 agedays using gh_percentiles_cdc_days, nogen
+
+	
+gen whoageweight = 5 - agedays / 365.25
+gen cdcageweight = agedays / 365.25 - 2
+	
+foreach s in m f {
+	foreach p in wt ht bmi {
+		foreach t in l m s p5 p10 p25 p50 p75 p90 p95 z2neg z1neg z0 z1 z2 { 
+		
+				gen gradual_`s'_`p'_`t' = who_`s'_`p'_`t' * whoageweight/3 + cdc_`s'_`p'_`t' * cdcageweight/3 
+				replace gradual_`s'_`p'_`t' = who_`s'_`p'_`t' if agedays <= 730	
+				replace gradual_`s'_`p'_`t' = cdc_`s'_`p'_`t' if agedays >= 1826	
+				
+		}
+	}
+}
+
+*Make smoothed 85th percentile for BMI
+foreach s in m f {
+	foreach p in bmi {
+		foreach t in p85 { 
+		
+				gen gradual_`s'_`p'_`t' = who_`s'_`p'_`t' * whoageweight/3 + cdc_`s'_`p'_`t' * cdcageweight/3 
+				replace gradual_`s'_`p'_`t' = who_`s'_`p'_`t' if agedays <= 730	
+				replace gradual_`s'_`p'_`t' = cdc_`s'_`p'_`t' if agedays >= 1826	
+				
+		}
+	}
+}
+
+*Gen sudden curves, WHO <2y, CDC after
+foreach s in m f {
+	foreach p in wt ht bmi {
+		foreach t in l m s p5 p10 p25 p50 p75 p90 p95 z2neg z1neg z0 z1 z2 { 
+				gen sudden_`s'_`p'_`t' = who_`s'_`p'_`t' if agedays <= 730	
+				replace sudden_`s'_`p'_`t' = cdc_`s'_`p'_`t' if agedays >= 731		
+		}
+	}
+}
+
+*Make sudden 85th percentile for BMI
+foreach s in m f {
+	foreach p in bmi {
+		foreach t in p85 { 
+				gen sudden_`s'_`p'_`t' = who_`s'_`p'_`t' if agedays <= 730	
+				replace sudden_`s'_`p'_`t' = cdc_`s'_`p'_`t' if agedays >= 731		
+		}
+	}
+}
+
+
+save gh_percentiles_gradual_days, replace
+export delimited using gh_percentiles_gradual_days, replace
+
+*/
+
+
+**************				Make gradual percentiles/z-scores by months
+
+******     This is GitHub file for months									********
+
+/*
+use gh_percentiles_who_months, clear
+merge 1:1 agemonths using gh_percentiles_cdc_months, nogen
+
+gen whoageweight = 5 - agemonths / 12
+gen cdcageweight = agemonths / 12 - 2
+	
+foreach s in m f {
+	foreach p in wt ht bmi {
+		foreach t in l m s p5 p10 p25 p50 p75 p90 p95 z2neg z1neg z0 z1 z2 { 
+		
+				gen gradual_`s'_`p'_`t' = who_`s'_`p'_`t' * whoageweight/3 + cdc_`s'_`p'_`t' * cdcageweight/3 
+				replace gradual_`s'_`p'_`t' = who_`s'_`p'_`t' if agedays <= 730
+				replace gradual_`s'_`p'_`t' = cdc_`s'_`p'_`t' if agedays >= 1826	
+				
+		}
+	}
+}
+	
+	
+*Make gradual 85th percentile for BMI
+foreach s in m f {
+	foreach p in bmi {
+		foreach t in p85 { 
+		
+				gen gradual_`s'_`p'_`t' = who_`s'_`p'_`t' * whoageweight/3 + cdc_`s'_`p'_`t' * cdcageweight/3 
+				replace gradual_`s'_`p'_`t' = who_`s'_`p'_`t' if agedays <=730
+				replace gradual_`s'_`p'_`t' = cdc_`s'_`p'_`t' if agedays >= 1826	
+				
+		}
+	}
+}
+	
+*Gen sudden curves, WHO <2y, CDC after
+foreach s in m f {
+	foreach p in wt ht bmi {
+		foreach t in l m s p5 p10 p25 p50 p75 p90 p95 z2neg z1neg z0 z1 z2 { 
+				gen sudden_`s'_`p'_`t' = who_`s'_`p'_`t' if agedays <= 730	
+				replace sudden_`s'_`p'_`t' = cdc_`s'_`p'_`t' if agedays >= 731		
+		}
+	}
+}
+
+*Make sudden 85th percentile for BMI
+foreach s in m f {
+	foreach p in bmi {
+		foreach t in p85 { 
+				gen sudden_`s'_`p'_`t' = who_`s'_`p'_`t' if agedays <= 730	
+				replace sudden_`s'_`p'_`t' = cdc_`s'_`p'_`t' if agedays >= 731		
+		}
+	}
+}
+	
+save gh_percentiles_gradual_months, replace
+export delimited using gh_percentiles_gradual_months, replace
+*/
+
+**************				Export values I want for month tables for manuscript
+
+/*
+
+
+use gh_percentiles_gradual_months, clear
+
+*Want capitalized parameters
+
+rename *wt* *WT*
+rename *ht* *HT*
+rename *bmi* *BMI*
+
+*Change sex names
+rename *_m_* *_B_*
+rename *_f_* *_G_*
+
+*Keep only integer months
+gen intagemonths = int(agemonths)
+keep if intagemonths == agemonths
+
+*Keep 2 through 5 years
+keep if agemonths>=24 & agemonths<=60
+
+save gh_percentiles_gradual_months_forman, replace
+
+
+*Wt and ht only, do BMI next so can include p85
+
+foreach p in WT HT {
+	foreach s in B G {
+		
+		use gh_percentiles_gradual_months_forman, clear
+	
+		*Keep only variables for that dataset 
+		keep agemonths gradual_`s'_`p'_z2neg gradual_`s'_`p'_p5 gradual_`s'_`p'_p10 gradual_`s'_`p'_p25 gradual_`s'_`p'_p50 gradual_`s'_`p'_p75 gradual_`s'_`p'_p90 gradual_`s'_`p'_p95  gradual_`s'_`p'_z2
+		
+		*Order
+		order agemonths gradual_`s'_`p'_z2neg gradual_`s'_`p'_p5 gradual_`s'_`p'_p10 gradual_`s'_`p'_p25 gradual_`s'_`p'_p50 gradual_`s'_`p'_p75 gradual_`s'_`p'_p90 gradual_`s'_`p'_p95  gradual_`s'_`p'_z2
+		
+		*Round to nearest 0.1
+		foreach v in gradual_`s'_`p'_z2neg gradual_`s'_`p'_p5 gradual_`s'_`p'_p10 gradual_`s'_`p'_p25 gradual_`s'_`p'_p50 gradual_`s'_`p'_p75 gradual_`s'_`p'_p90 gradual_`s'_`p'_p95  gradual_`s'_`p'_z2 {
+			replace `v'=round(`v', 0.1)
+			
+		}
+		
+		*Rename 
+		rename agemonths Months
+		rename gradual_`s'_`p'_z2neg `s'_`p'_2nd
+		rename gradual_`s'_`p'_p5 `s'_`p'_5th
+		rename gradual_`s'_`p'_p10 `s'_`p'_10th
+		rename gradual_`s'_`p'_p25 `s'_`p'_25th
+		rename gradual_`s'_`p'_p50 `s'_`p'_50th
+		rename gradual_`s'_`p'_p75 `s'_`p'_75th
+		rename gradual_`s'_`p'_p90 `s'_`p'_90th
+		rename gradual_`s'_`p'_p95 `s'_`p'_95th
+		rename gradual_`s'_`p'_z2 `s'_`p'_98th
+
+		
+		*Save
+		save "/Users/carriedaymont/Dropbox/Dropbox Documents/Research/__twosmooth/_Percentile Tables/Data Tables for Printing/gradual_months_`s'_`p'", replace
+		export excel "/Users/carriedaymont/Dropbox/Dropbox Documents/Research/__twosmooth/_Percentile Tables/Data Tables for Printing/gradual_months_`s'_`p'.xlsx", firstrow(variables) replace
+		
+	}
+}
+
+*BMI here, including p85
+foreach p in BMI {
+	foreach s in B G {
+		
+		use gh_percentiles_gradual_months_forman, clear
+	
+		*Keep only variables for that dataset 
+		keep agemonths gradual_`s'_`p'_z2neg gradual_`s'_`p'_p5 gradual_`s'_`p'_p10 gradual_`s'_`p'_p25 gradual_`s'_`p'_p50 gradual_`s'_`p'_p75 gradual_`s'_`p'_p85 gradual_`s'_`p'_p90 gradual_`s'_`p'_p95  gradual_`s'_`p'_z2
+		
+		*Order
+		order agemonths gradual_`s'_`p'_z2neg gradual_`s'_`p'_p5 gradual_`s'_`p'_p10 gradual_`s'_`p'_p25 gradual_`s'_`p'_p50 gradual_`s'_`p'_p75 gradual_`s'_`p'_p85 gradual_`s'_`p'_p90 gradual_`s'_`p'_p95  gradual_`s'_`p'_z2
+		
+		*Round to nearest 0.1
+		foreach v in gradual_`s'_`p'_z2neg gradual_`s'_`p'_p5 gradual_`s'_`p'_p10 gradual_`s'_`p'_p25 gradual_`s'_`p'_p50 gradual_`s'_`p'_p75 gradual_`s'_`p'_p85 gradual_`s'_`p'_p90 gradual_`s'_`p'_p95  gradual_`s'_`p'_z2 {
+			replace `v'=round(`v', 0.1)
+		}
+					
+		*Rename 
+		rename agemonths Months
+		rename gradual_`s'_`p'_z2neg `s'_`p'_2nd
+		rename gradual_`s'_`p'_p5 `s'_`p'_5th
+		rename gradual_`s'_`p'_p10 `s'_`p'_10th
+		rename gradual_`s'_`p'_p25 `s'_`p'_25th
+		rename gradual_`s'_`p'_p50 `s'_`p'_50th
+		rename gradual_`s'_`p'_p75 `s'_`p'_75th
+		rename gradual_`s'_`p'_p85 `s'_`p'_85th		
+		rename gradual_`s'_`p'_p90 `s'_`p'_90th
+		rename gradual_`s'_`p'_p95 `s'_`p'_95th
+		rename gradual_`s'_`p'_z2 `s'_`p'_98th
+		
+		*Save
+		save "/Users/carriedaymont/Dropbox/Dropbox Documents/Research/__twosmooth/_Percentile Tables/Data Tables for Printing/gradual_months_`s'_`p'", replace
+		export excel "/Users/carriedaymont/Dropbox/Dropbox Documents/Research/__twosmooth/_Percentile Tables/Data Tables for Printing/gradual_months_`s'_`p'.xlsx", firstrow(variables) replace
+
+	}
+}
+
+*/
+
+
+
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*****
+*****								Figures				***						*****************************
+*****
+
+
+*Create graph dataset
+
+***For all figures, "2nd percentile" is z = -2; "98th percentile" is z = +2
+
+***Color-blind friendly colors
+
+/*
+
+use gh_percentiles_gradual_days, clear
+
+gen ageyears=agedays/365.25
+
+*Only keep subset of values for graph -- otherwise gets bumpy
+gen mod3=mod(agedays, 3)
+gen mod10=mod(agedays, 10)
+
+gen plot=1 if agedays==0|agedays==2191|agedays==730|agedays==365|agedays==2922
+replace plot=1 if mod10==1
+replace plot=1 if mod3==1 & agedays<60
+replace plot=1 if mod3==1 & agedays>720 & agedays<740
+
+replace plot=0 if ageyears<1 | ageyears >5.19
+
+drop if plot!=1
+
+*Shorten var names to make figure code easier to read
+rename gradual_* g_*
+rename sudden_* su_*
+gen ay=ageyears
+
+save gradual_graph, replace
+
+*/
+
+
+
+
+**************************** MANUSCRIPT   GRADUAL FIGURES
+
+/*
+*****
+*****							MANUSCRIPT GRADUAL Weight Figures								******************
+*****
+
+
+
+
+*1-5 years
+
+use gradual_graph, clear
+set scheme s1mono
+
+#delimit ;
+sort ageyears;
+twoway
+
+(line g_f_wt_z2neg ay, lc("30 136 229") lw(medthick))
+(line g_f_wt_p5 ay, lc("216 27 96") lw(medthick))
+(line g_f_wt_p10 ay, lc("0 77 64"*0.6) lw(medthick))
+(line g_f_wt_p25 ay, lc("255 140 0"*1.6) lw(medthick))
+(line g_f_wt_p50 ay, lc(black) lw(medthick))
+(line g_f_wt_p75 ay, lc("255 140 0"*1.6) lw(medthick))
+(line g_f_wt_p90 ay, lc("0 77 64"*0.6) lw(medthick))
+(line g_f_wt_p95 ay, lc("216 27 96") lw(medthick))
+(line g_f_wt_z2 ay, lc("30 136 229") lw(medthick))
+
+,
+
+xtitle("Age (Years)", size(small))
+ytitle("Weight (kg)", size(small))
+title("Gradual WHO-CDC: Girls Weight-for-Age 1-5 Years", size(2.7) ring(0)  bcolor(white %100) box)
+xlab(1(0.5)5, labsize(small) grid glw(medthin) glc(gs8))
+xmtick(1(0.0833)5.2, grid glw(vthin) glc(gs14))
+ylab(6(1)27, labsize(small) angle(0) grid glw(thin) glc(gs10) gextend)
+ymtick(6(0.2)27, grid glw(vthin) glc(gs14) gextend)
+xscale(range(1 5) noextend)
+yscale(range(6 27.1))
+legend(off)
+
+text(26.42 5.1 "98", size(1.8) bcolor(white))
+text(24.37 5.1 "95", size(1.8) bcolor(white))
+text(22.8 5.1 "90", size(1.8) bcolor(white))
+text(20.5 5.1 "75", size(1.8) bcolor(white))
+text(18.62 5.1 "50", size(1.8) bcolor(white))
+text(17 5.1 "25", size(1.8) bcolor(white))
+text(15.8 5.1 "10", size(1.8) bcolor(white))
+text(15.07 5.1 "5", size(1.8) bcolor(white))
+text(14.5 5.1 "2", size(1.8) bcolor(white))
+
+plotregion(margin(zero))
+plotregion(lstyle(none))
+graphregion(margin(l r+2))
+xsize(8.5) ysize(11)
+
+subtitle("1B", pos(12) ring(1) size(3) placement(west) span)
+
+;
+graph export fig1B_manuscript_wt_girl_gradual.png, replace
+;
+#delimit cr
+
+
+
+
+
+*****
+*****								MANUSCRIPT SUDDEN Weight Figures								******************
+*****
+
+
+*1-5 years
+
+use gradual_graph, clear
+set scheme s1mono
+
+
+#delimit ;
+twoway
+
+(line su_f_wt_z2neg ay, lc("30 136 229") lw(medthick))
+(line su_f_wt_p5 ay, lc("216 27 96") lw(medthick))
+(line su_f_wt_p10 ay, lc("0 77 64"*0.6) lw(medthick))
+(line su_f_wt_p25 ay, lc("255 140 0"*1.6) lw(medthick))
+(line su_f_wt_p50 ay, lc(black) lw(medthick))
+(line su_f_wt_p75 ay, lc("255 140 0"*1.6) lw(medthick))
+(line su_f_wt_p90 ay, lc("0 77 64"*0.6) lw(medthick))
+(line su_f_wt_p95 ay, lc("216 27 96") lw(medthick))
+(line su_f_wt_z2 ay, lc("30 136 229") lw(medthick))
+
+,
+
+xtitle("Age (Years)", size(small))
+ytitle("Weight (kg)", size(small))
+title("CDC Recommendations: Girls Weight-for-Age 1-5 Years", size(2.7) ring(0)  bcolor(white %100) box)
+xlab(1(0.5)5, labsize(small) grid glw(medthin) glc(gs8))
+xmtick(1(0.0833)5.2, grid glw(vthin) glc(gs14))
+ylab(6(1)27, labsize(small) angle(0) grid glw(thin) glc(gs10) nogextend)
+ymtick(6(0.2)27, grid glw(vthin) glc(gs14) nogextend)
+xscale(range(1 5) noextend)
+yscale(range(6 27.1))
+legend(off)
+
+text(26.42 5.1 "98", size(1.8) bcolor(white))
+text(24.37 5.1 "95", size(1.8) bcolor(white))
+text(22.8 5.1 "90", size(1.8) bcolor(white))
+text(20.5 5.1 "75", size(1.8) bcolor(white))
+text(18.62 5.1 "50", size(1.8) bcolor(white))
+text(17 5.1 "25", size(1.8) bcolor(white))
+text(15.8 5.1 "10", size(1.8) bcolor(white))
+text(15.07 5.1 "5", size(1.8) bcolor(white))
+text(14.5 5.1 "2", size(1.8) bcolor(white))
+
+plotregion(margin(zero))
+plotregion(lstyle(none))
+graphregion(margin(l r+2))
+xsize(8.5) ysize(11)
+
+subtitle("1A", pos(12) ring(1) size(3) placement(west) span)
+
+;
+graph export fig1A_manuscript_wt_girl_sudden.png, replace
+;
+#delimit cr
+	
+
+
+	
+
+*****
+*****								MANUSCRIPT GRADUAL Height Figures								********************
+*****
+
+
+
+*1-5 years
+
+use gradual_graph, clear
+set scheme s1mono
+
+
+#delimit ;
+twoway
+
+(line g_f_ht_z2neg ay, lc("30 136 229") lw(medthick))
+(line g_f_ht_p5 ay, lc("216 27 96") lw(medthick))
+(line g_f_ht_p10 ay, lc("0 77 64"*0.6) lw(medthick))
+(line g_f_ht_p25 ay, lc("255 140 0"*1.6) lw(medthick))
+(line g_f_ht_p50 ay, lc(black) lw(medthick))
+(line g_f_ht_p75 ay, lc("255 140 0"*1.6) lw(medthick))
+(line g_f_ht_p90 ay, lc("0 77 64"*0.6) lw(medthick))
+(line g_f_ht_p95 ay, lc("216 27 96") lw(medthick))
+(line g_f_ht_z2 ay, lc("30 136 229") lw(medthick))
+
+,
+xtitle("Age (Years)", size(small))
+ytitle("Height (cm)", size(small))
+title("Gradual WHO-CDC: Girls Height-for-Age 1-5 Years", size(2.7) ring(0)  bcolor(white %100) box)
+xlab(1(0.5)5, labsize(small) grid glw(medthin) glc(gs8))
+xmtick(1(0.0833)5, grid glw(vthin) glc(gs14))
+ylab(65(5)120, labsize(small) angle(0) grid glw(thin) glc(gs10) nogextend)
+ymtick(65(1)120, grid glw(vthin) glc(gs14) nogextend)
+xscale(range(1 5) noextend)
+yscale(range(65 120))
+legend(off)
+
+text(119.45 5.1 "98", size(1.8) bcolor(white))
+text(117.45 5.1 "95", size(1.8) bcolor(white))
+text(115.7 5.1 "90", size(1.8) bcolor(white))
+text(112.9 5.1 "75", size(1.8) bcolor(white))
+text(109.4 5.1 "50", size(1.8) bcolor(white))
+text(106.2 5.1 "25", size(1.8) bcolor(white))
+text(103.5 5.1 "10", size(1.8) bcolor(white))
+text(101.6 5.1 "5", size(1.8) bcolor(white))
+text(99.9 5.1 "2", size(1.8) bcolor(white))
+
+plotregion(margin(zero))
+plotregion(lstyle(none))
+graphregion(margin(l r+2))
+xsize(8.5) ysize(11)
+
+subtitle("2B", pos(12) ring(1) size(3) placement(west) span)
+
+;
+graph export fig2B_manuscript_ht_girl_gradual.png, replace
+;
+#delimit cr
+	
+
+
+*****
+*****								MANUSCRIPT SUDDEN Height Figures								********************
+*****
+
+
+
+*1-5 years
+
+use gradual_graph, clear
+set scheme s1mono
+
+
+#delimit ;
+twoway
+
+(line su_f_ht_z2neg ay, lc("30 136 229") lw(medthick))
+(line su_f_ht_p5 ay, lc("216 27 96") lw(medthick))
+(line su_f_ht_p10 ay, lc("0 77 64"*0.6) lw(medthick))
+(line su_f_ht_p25 ay, lc("255 140 0"*1.6) lw(medthick))
+(line su_f_ht_p50 ay, lc(black) lw(medthick))
+(line su_f_ht_p75 ay, lc("255 140 0"*1.6) lw(medthick))
+(line su_f_ht_p90 ay, lc("0 77 64"*0.6) lw(medthick))
+(line su_f_ht_p95 ay, lc("216 27 96") lw(medthick))
+(line su_f_ht_z2 ay, lc("30 136 229") lw(medthick))
+
+,
+xtitle("Age (Years)", size(small))
+ytitle("Height (cm)", size(small))
+title("CDC Recommendations: Girls Height-for-Age 1-5 Years", size(2.7) ring(0) bcolor(white %100) box)
+xlab(1(0.5)5, labsize(small) grid glw(medthin) glc(gs8))
+xmtick(1(0.0833)5, grid glw(vthin) glc(gs14))
+ylab(65(5)120, labsize(small) angle(0) grid glw(thin) glc(gs10) nogextend)
+ymtick(65(1)120, grid glw(vthin) glc(gs14) nogextend)
+xscale(range(1 5) noextend)
+yscale(range(65 120))
+legend(off)
+
+text(119.45 5.1 "98", size(1.8) bcolor(white))
+text(117.45 5.1 "95", size(1.8) bcolor(white))
+text(115.7 5.1 "90", size(1.8) bcolor(white))
+text(112.9 5.1 "75", size(1.8) bcolor(white))
+text(109.4 5.1 "50", size(1.8) bcolor(white))
+text(106.2 5.1 "25", size(1.8) bcolor(white))
+text(103.5 5.1 "10", size(1.8) bcolor(white))
+text(101.6 5.1 "5", size(1.8) bcolor(white))
+text(99.9 5.1 "2", size(1.8) bcolor(white))
+
+plotregion(margin(zero))
+plotregion(lstyle(none))
+graphregion(margin(l r+2))
+xsize(8.5) ysize(11)
+
+subtitle("2A", pos(12) ring(1) size(3) placement(west) span)
+
+;
+graph export fig2A_manuscript_ht_girl_sudden.png, replace
+;
+#delimit cr
+
+
+
+
+
+
+
+*****
+*****								MANUSCRIPT gradual BMI Figures								*****************************
+*****
+
+
+
+*1-5 years
+
+use gradual_graph, clear
+set scheme s1mono
+
+
+#delimit ;
+twoway
+
+(line g_f_bmi_z2neg ay, lc("30 136 229") lw(medthick))
+(line g_f_bmi_p5 ay, lc("216 27 96") lw(medthick))
+(line g_f_bmi_p10 ay, lc("0 77 64"*0.6) lw(medthick))
+(line g_f_bmi_p25 ay, lc("255 140 0"*1.6) lw(medthick))
+(line g_f_bmi_p50 ay, lc(black) lw(medthick))
+(line g_f_bmi_p75 ay, lc("255 140 0"*1.6) lw(medthick))
+(line g_f_bmi_p85 ay, lc(gs6) lw(medthick))
+(line g_f_bmi_p90 ay, lc("0 77 64"*0.6) lw(medthick))
+(line g_f_bmi_p95 ay, lc("216 27 96") lw(medthick))
+(line g_f_bmi_z2 ay, lc("30 136 229") lw(medthick))
+
+,
+xtitle("Age (Years)", size(small))
+ytitle("Body Mass Index (kg/m{superscript: 2})", size(small))
+title("Gradual WHO-CDC: Girls BMI-for-Age 1-5 Years", size(2.7) ring(0)  bcolor(white %100) box)
+xlab(1(0.5)5, labsize(small) grid glw(medthin) glc(gs8))
+xmtick(1(0.0833)5, grid glw(vthin) glc(gs14))
+ylab(12.5(0.5)22, labsize(small) angle(0) grid glw(thin) glc(gs10) nogextend)
+ymtick(12.5(0.1)22, grid glw(vthin) glc(gs14) nogextend)
+xscale(range(1 5) noextend)
+yscale(range(12.5 22))
+legend(off)
+
+text(20.48 5.1 "98", size(1.8) bcolor(white))
+text(18.46 5.1 "95", size(1.8) bcolor(white))
+text(17.51 5.1 "90", size(1.8) bcolor(white))
+text(16.95 5.1 "85", size(1.8) bcolor(white))
+text(16.3 5.1 "75", size(1.8) bcolor(white))
+text(15.3 5.1 "50", size(1.8) bcolor(white))
+text(14.53 5.1 "25", size(1.8) bcolor(white))
+text(13.95 5.1 "10", size(1.8) bcolor(white))
+text(13.65 5.1 "5", size(1.8) bcolor(white))
+text(13.39 5.1 "2", size(1.8) bcolor(white))
+
+plotregion(margin(zero))
+plotregion(lstyle(none))
+graphregion(margin(l r+2))
+xsize(8.5) ysize(11)
+
+subtitle("3B", pos(12) ring(1) size(3) placement(west) span)
+
+;
+graph export fig3B_manuscript_bmi_girl_gradual.png, replace
+;
+#delimit cr
+
+
+	
+*****
+*****					MANUSCRIPT SUDDEN BMI Figures						*****************************
+*****
+
+
+	
+*1-5 years
+
+use gradual_graph, clear
+set scheme s1mono
+
+
+#delimit ;
+twoway
+
+(line su_f_bmi_z2neg ay, lc("30 136 229") lw(medthick))
+(line su_f_bmi_p5 ay, lc("216 27 96") lw(medthick))
+(line su_f_bmi_p10 ay, lc("0 77 64"*0.6) lw(medthick))
+(line su_f_bmi_p25 ay, lc("255 140 0"*1.6) lw(medthick))
+(line su_f_bmi_p50 ay, lc(black) lw(medthick))
+(line su_f_bmi_p75 ay, lc("255 140 0"*1.6) lw(medthick))
+(line su_f_bmi_p85 ay, lc(gs6) lw(medthick))
+(line su_f_bmi_p90 ay, lc("0 77 64"*0.6) lw(medthick))
+(line su_f_bmi_p95 ay, lc("216 27 96") lw(medthick))
+(line su_f_bmi_z2 ay, lc("30 136 229") lw(medthick))
+,
+xtitle("Age (Years)", size(small))
+ytitle("Body Mass Index (kg/m{superscript: 2})", size(small))
+title("CDC Recommendations: Girls BMI-for-Age 1-5 Years", size(2.7) ring(0)  bcolor(white %100) box)
+xlab(1(0.5)5, labsize(small) grid glw(medthin) glc(gs8))
+xmtick(1(0.0833)5.2, grid glw(vthin) glc(gs14))
+ylab(12.5(0.5)22, labsize(small) angle(0) grid glw(thin) glc(gs10) nogextend)
+ymtick(12.5(0.1)22, grid glw(vthin) glc(gs14) nogextend)
+xscale(range(1 5.2) noextend)
+yscale(range(12.5 22))
+legend(off)
+
+text(20.48 5.1 "98", size(1.8) bcolor(white))
+text(18.46 5.1 "95", size(1.8) bcolor(white))
+text(17.51 5.1 "90", size(1.8) bcolor(white))
+text(16.95 5.1 "85", size(1.8) bcolor(white))
+text(16.3 5.1 "75", size(1.8) bcolor(white))
+text(15.3 5.1 "50", size(1.8) bcolor(white))
+text(14.53 5.1 "25", size(1.8) bcolor(white))
+text(13.95 5.1 "10", size(1.8) bcolor(white))
+text(13.65 5.1 "5", size(1.8) bcolor(white))
+text(13.39 5.1 "2", size(1.8) bcolor(white))
+
+plotregion(margin(zero))
+plotregion(lstyle(none))
+graphregion(margin(l r+2))
+xsize(8.5) ysize(11)
+
+subtitle("3A", pos(12) ring(1) size(3) placement(west) span)
+;
+graph export fig3A_manuscript_bmi_girl_sudden.png, replace
+;
+#delimit cr
+	
+*/
+
+
+
+
+
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+*
+*
+*
+*
+*
+*
+*
+*
+*
+
+
+
+
+
+
+
+**Now making 3 sets of printable charts: 0-2y, 1-6y, 2-19y
+
+*                          *Start here for PRINT FIGURES
+
+
+
+
+*Change to directory in which to store completed files
+cd "/Users/carriedaymont/Dropbox/Dropbox Documents/Research/__twosmooth/_Percentile Tables"
+
+*One aspect of code does not work with versions later than 15
+version 15
+
+/*
+
+
+*Make NEW graph dataset with all ages
+
+***Color-blind friendly colors
+
+use gh_percentiles_gradual_days, clear
+
+gen ageyears=agedays/365.25
+
+*Only keep subset of figures for graph -- otherwise gets bumpy
+gen mod3=mod(agedays, 3)
+gen mod10=mod(agedays, 10)
+
+gen plot=1 if agedays==0|agedays==2191|agedays==730|agedays==365|agedays==366|agedays==2922
+replace plot=1 if mod10==1
+replace plot=1 if mod3==1 & agedays<60
+replace plot=1 if mod3==1 & agedays>720 & agedays<740
+
+drop if plot!=1
+
+*3 age groups
+gen ag1=1 if ageyears<=3
+gen ag2=1 if ageyears>=1 & ageyears<=6
+gen ag3=1 if ageyears >=2
+
+*Shorten var names to make figure code easier to read
+rename gradual_* g_*
+rename sudden_* su_*
+gen ay=ageyears
+gen am=ay*12
+
+save gradual_graph_p, replace
+*/
+
+
+
+*****
+*****							GIRLS PRINT GRADUAL Weight Figures 							******************
+*****
+
+
+
+***GIRLS PRINT WEIGHT 0-36 months
+/*
+
+use gradual_graph_p, clear
+set scheme s1mono
+
+local s (line g_f_wt
+local agu if ag1==1 & ay<1.2
+local ago if ag1==1 & ay>=1
+local eo lw(medthick))
+local eu lw(medthin))
+local c color("216 27 96")
+
+
+#delimit ;
+sort ageyears;
+twoway
+
+`s'_z2neg am `agu', lc("30 136 229") `eu'
+`s'_p5 am `agu', lc("216 27 96")  `eu'
+`s'_p10 am `agu', lc("0 77 64"*0.6)  `eu'
+`s'_p25 am `agu', lc("255 140 0"*1.6)  `eu'
+`s'_p50 am `agu', lc(black) `eu'
+`s'_p75 am `agu', lc("255 140 0"*1.6)  `eu'
+`s'_p90 am `agu', lc("0 77 64"*0.6) `eu'
+`s'_p95 am `agu', lc("216 27 96")  `eu'
+`s'_z2 am `agu', lc("30 136 229")  `eu'
+
+`s'_z2neg am `ago', lc("30 136 229") `eo'
+`s'_p5 am `ago', lc("216 27 96")  `eo'
+`s'_p10 am `ago', lc("0 77 64"*0.6)  `eo'
+`s'_p25 am `ago', lc("255 140 0"*1.6)  `eo'
+`s'_p50 am `ago', lc(black) `eo'
+`s'_p75 am `ago', lc("255 140 0"*1.6)  `eo'
+`s'_p90 am `ago', lc("0 77 64"*0.6) `eo'
+`s'_p95 am `ago', lc("216 27 96")  `eo'
+`s'_z2 am `ago', lc("30 136 229")  `eo'
+
+,
+
+xtitle("Age (Months)", size(small) `c' )
+ytitle("Weight (kg)", size(small) `c' )
+title("{bf:Girls          Weight-for-Age}"  "Gradual WHO-CDC  0-36 Months", size(2.7) ring(0) bcolor(white %100) box color(black) l`c' lw(thick) linegap(2) margin(b+1 t+1))
+xlab(0(3)36, labsize(small) grid glw(medthin) glc(gs8))
+xmtick(0(0.5)36, grid glw(vthin) glc(gs14))
+ylab(2(1)19, labsize(small) angle(0) grid glw(thin) glc(gs10) gextend)
+ymtick(2(0.2)19, grid glw(vthin) glc(gs14) gextend)
+xscale(range(0 36) noextend)
+yscale(range(2 19.1))
+legend(off)
+
+text(18.17 34.8 "98", size(1.8) bcolor(white))
+text(17.2 34.8 "95", size(1.8) bcolor(white))
+text(16.4 34.8 "90", size(1.8) bcolor(white))
+text(15.15 34.8 "75", size(1.8) bcolor(white))
+text(13.94 34.8 "50", size(1.8) bcolor(white))
+text(12.9 34.8 "25", size(1.8) bcolor(white))
+text(12 34.8 "10", size(1.8) bcolor(white))
+text(11.47 34.8 "5", size(1.8) bcolor(white))
+text(11 34.8 "2", size(1.8) bcolor(white))
+
+text(2 36.3 "2", size(1.5) bcolor(white))
+text(3 36.3 "3", size(1.5) bcolor(white))
+text(4 36.3 "4", size(1.5) bcolor(white))
+text(5 36.3 "5", size(1.5) bcolor(white))
+text(6 36.3 "6", size(1.5) bcolor(white))
+text(6 36.3 "6", size(1.5) bcolor(white))
+text(7 36.3 "7", size(1.5) bcolor(white))
+text(8 36.3 "8", size(1.5) bcolor(white))
+text(9 36.3 "9", size(1.5) bcolor(white))
+text(10 36.38 "10", size(1.5) bcolor(white))
+text(11 36.38 "11", size(1.5) bcolor(white))
+text(12 36.38 "12", size(1.5) bcolor(white))
+text(13 36.38 "13", size(1.5) bcolor(white))
+text(14 36.38 "14", size(1.5) bcolor(white))
+text(15 36.38 "15", size(1.5) bcolor(white))
+text(16 36.38 "16", size(1.5) bcolor(white))
+text(17 36.38 "17", size(1.5) bcolor(white))
+text(18 36.38 "18", size(1.5) bcolor(white))
+text(19 36.38 "19", size(1.5) bcolor(white))
+
+plotregion(margin(zero))
+plotregion(lstyle(none))
+graphregion(margin(l r+2))
+
+xsize(8.5) ysize(11)
+
+;
+graph export print-wt-girls-gradual-0-36m.pdf, replace
+;
+#delimit cr
+
+*/
+
+
+***BOYS PRINT WEIGHT 0-36 months
+/*
+
+use gradual_graph_p, clear
+set scheme s1mono
+
+
+local s (line g_m_wt
+local agu if ag1==1 & ay<1.2
+local ago if ag1==1 & ay>=1
+local eo lw(medthick))
+local eu lw(medthin))
+local c color("30 136 229")
+
+#delimit ;
+sort ageyears;
+twoway
+
+`s'_z2neg am `agu', lc("30 136 229") `eu'
+`s'_p5 am `agu', lc("216 27 96")  `eu'
+`s'_p10 am `agu', lc("0 77 64"*0.6)  `eu'
+`s'_p25 am `agu', lc("255 140 0"*1.6)  `eu'
+`s'_p50 am `agu', lc(black) `eu'
+`s'_p75 am `agu', lc("255 140 0"*1.6)  `eu'
+`s'_p90 am `agu', lc("0 77 64"*0.6) `eu'
+`s'_p95 am `agu', lc("216 27 96")  `eu'
+`s'_z2 am `agu', lc("30 136 229")  `eu'
+
+`s'_z2neg am `ago', lc("30 136 229") `eo'
+`s'_p5 am `ago', lc("216 27 96")  `eo'
+`s'_p10 am `ago', lc("0 77 64"*0.6)  `eo'
+`s'_p25 am `ago', lc("255 140 0"*1.6)  `eo'
+`s'_p50 am `ago', lc(black) `eo'
+`s'_p75 am `ago', lc("255 140 0"*1.6)  `eo'
+`s'_p90 am `ago', lc("0 77 64"*0.6) `eo'
+`s'_p95 am `ago', lc("216 27 96")  `eo'
+`s'_z2 am `ago', lc("30 136 229")  `eo'
+
+,
+
+xtitle("Age (Months)", size(small) `c' )
+ytitle("Weight (kg)", size(small) `c' )
+title("{bf:Boys           Weight-for-Age}"  "Gradual WHO-CDC  0-36 Months", size(2.7) ring(0) bcolor(white %100) box  color(black) l`c' lw(thick) linegap(2) margin(b+1 t+1))
+xlab(0(3)36, labsize(small) grid glw(medthin) glc(gs8))
+xmtick(0(0.5)36, grid glw(vthin) glc(gs14))
+ylab(2(1)19, labsize(small) angle(0) grid glw(thin) glc(gs10) gextend)
+ymtick(2(0.2)19, grid glw(vthin) glc(gs14) gextend)
+xscale(range(0 36) noextend)
+yscale(range(2 19.1))
+legend(off)
+
+text(18.3 34.8 "98", size(1.8) bcolor(white))
+text(17.52 34.8 "95", size(1.8) bcolor(white))
+text(16.75 34.8 "90", size(1.8) bcolor(white))
+text(15.63 34.8 "75", size(1.8) bcolor(white))
+text(14.4 34.8 "50", size(1.8) bcolor(white))
+text(13.47 34.8 "25", size(1.8) bcolor(white))
+text(12.52 34.8 "10", size(1.8) bcolor(white))
+text(11.96 34.8 "5", size(1.8) bcolor(white))
+text(11.44 34.8 "2", size(1.8) bcolor(white))
+
+text(2 36.3 "2", size(1.5) bcolor(white))
+text(3 36.3 "3", size(1.5) bcolor(white))
+text(4 36.3 "4", size(1.5) bcolor(white))
+text(5 36.3 "5", size(1.5) bcolor(white))
+text(6 36.3 "6", size(1.5) bcolor(white))
+text(6 36.3 "6", size(1.5) bcolor(white))
+text(7 36.3 "7", size(1.5) bcolor(white))
+text(8 36.3 "8", size(1.5) bcolor(white))
+text(9 36.3 "9", size(1.5) bcolor(white))
+text(10 36.38 "10", size(1.5) bcolor(white))
+text(11 36.38 "11", size(1.5) bcolor(white))
+text(12 36.38 "12", size(1.5) bcolor(white))
+text(13 36.38 "13", size(1.5) bcolor(white))
+text(14 36.38 "14", size(1.5) bcolor(white))
+text(15 36.38 "15", size(1.5) bcolor(white))
+text(16 36.38 "16", size(1.5) bcolor(white))
+text(17 36.38 "17", size(1.5) bcolor(white))
+text(18 36.38 "18", size(1.5) bcolor(white))
+text(19 36.38 "19", size(1.5) bcolor(white))
+
+plotregion(margin(zero))
+plotregion(lstyle(none))
+graphregion(margin(l r+2))
+
+xsize(8.5) ysize(11)
+
+;
+graph export print-wt-boys-gradual-0-36m.pdf, replace
+;
+#delimit cr
+
+
+*/
+
+
+***GIRLS PRINT WEIGHT 1-6 Years
+/*
+use gradual_graph_p, clear
+set scheme s1mono
+
+local s (line g_f_wt
+local ag if ag2==1
+local e lw (medthick))
+local c color("216 27 96")
+
+
+#delimit ;
+sort ageyears;
+twoway
+
+`s'_z2neg ay `ag', lc("30 136 229") `e'
+`s'_p5 ay `ag', lc("216 27 96")  `e'
+`s'_p10 ay `ag', lc("0 77 64"*0.6)  `e'
+`s'_p25 ay `ag', lc("255 140 0"*1.6)  `e'
+`s'_p50 ay `ag', lc(black) `e'
+`s'_p75 ay `ag', lc("255 140 0"*1.6)  `e'
+`s'_p90 ay `ag', lc("0 77 64"*0.6) `e'
+`s'_p95 ay `ag', lc("216 27 96")  `e'
+`s'_z2 ay `ag', lc("30 136 229")  `e'
+
+,
+
+xtitle("Age (Years)", size(small) `c' )
+ytitle("Weight (kg)", size(small) `c' )
+title("{bf:Girls          Weight-for-Age}"  "Gradual WHO-CDC  1-6 Years", size(2.7) ring(0) bcolor(white %100) box color(black) l`c' lw(thick) linegap(2) margin(b+1 t+1))
+xlab(1(0.5)6, labsize(small) grid glw(medthin) glc(gs8))
+xmtick(1(0.0833)6, grid glw(vthin) glc(gs14))
+ylab(6(1)33, labsize(small) angle(0) grid glw(thin) glc(gs10) gextend)
+ymtick(6(0.2)33, grid glw(vthin) glc(gs14) gextend)
+xscale(range(1 6) noextend)
+yscale(range(6 33.1))
+legend(off)
+
+text(29.45 5.8 "98", size(1.8) bcolor(white))
+text(27.08 5.8 "95", size(1.8) bcolor(white))
+text(25.08 5.8 "90", size(1.8) bcolor(white))
+text(22.45 5.8 "75", size(1.8) bcolor(white))
+text(20.22 5.8 "50", size(1.8) bcolor(white))
+text(18.38 5.8 "25", size(1.8) bcolor(white))
+text(17.06 5.8 "10", size(1.8) bcolor(white))
+text(16.34 5.8 "5", size(1.8) bcolor(white))
+text(15.75 5.8 "2", size(1.8) bcolor(white))
+
+	
+text(6 6.05 "6", size(1.5) bcolor(white))
+text(7 6.05 "7", size(1.5) bcolor(white))
+text(8 6.05 "8", size(1.5) bcolor(white))
+text(9 6.05 "9", size(1.5) bcolor(white))
+text(10 6.06 "10", size(1.5) bcolor(white))
+text(11 6.06 "11", size(1.5) bcolor(white))
+text(12 6.06 "12", size(1.5) bcolor(white))
+text(13 6.06 "13", size(1.5) bcolor(white))
+text(14 6.06 "14", size(1.5) bcolor(white))
+text(15 6.06 "15", size(1.5) bcolor(white))
+text(16 6.06 "16", size(1.5) bcolor(white))
+text(17 6.06 "17", size(1.5) bcolor(white))
+text(18 6.06 "18", size(1.5) bcolor(white))
+text(19 6.06 "19", size(1.5) bcolor(white))
+text(20 6.06 "20", size(1.5) bcolor(white))
+text(21 6.07 "21", size(1.5) bcolor(white))
+text(22 6.07 "22", size(1.5) bcolor(white))
+text(23 6.07 "23", size(1.5) bcolor(white))
+text(24 6.07 "24", size(1.5) bcolor(white))
+text(25 6.07 "25", size(1.5) bcolor(white))
+text(26 6.07 "26", size(1.5) bcolor(white))
+text(27 6.07 "27", size(1.5) bcolor(white))
+text(28 6.07 "28", size(1.5) bcolor(white))
+text(29 6.07 "29", size(1.5) bcolor(white))
+text(30 6.07 "30", size(1.5) bcolor(white))
+text(31 6.07 "31", size(1.5) bcolor(white))
+text(32 6.07 "32", size(1.5) bcolor(white))
+text(33 6.07 "33", size(1.5) bcolor(white))
+
+
+plotregion(margin(zero))
+plotregion(lstyle(none))
+graphregion(margin(l r+2))
+
+xsize(8.5) ysize(11)
+
+;
+graph export print-wt-girls-gradual-1-6y.pdf, replace
+;
+#delimit cr
+
+*/
+
+**BOYS PRINT WEIGHT 1-6 Years
+/*
+
+use gradual_graph_p, clear
+set scheme s1mono
+
+local s (line g_m_wt
+local ag if ag2==1
+local e lw (medthick))
+local c color("30 136 229")
+
+#delimit ;
+sort ageyears;
+twoway
+
+`s'_z2neg ay `ag', lc("30 136 229") `e'
+`s'_p5 ay `ag', lc("216 27 96")  `e'
+`s'_p10 ay `ag', lc("0 77 64"*0.6)  `e'
+`s'_p25 ay `ag', lc("255 140 0"*1.6)  `e'
+`s'_p50 ay `ag', lc(black) `e'
+`s'_p75 ay `ag', lc("255 140 0"*1.6)  `e'
+`s'_p90 ay `ag', lc("0 77 64"*0.6) `e'
+`s'_p95 ay `ag', lc("216 27 96")  `e'
+`s'_z2 ay `ag', lc("30 136 229")  `e'
+
+,
+
+xtitle("Age (Years)", size(small) `c' )
+ytitle("Weight (kg)", size(small) `c' )
+title("{bf:Boys           Weight-for-Age}"  "Gradual WHO-CDC  1-6 Years", size(2.7) ring(0) bcolor(white %100) box color(black) l`c' lw(thick) linegap(2) margin(b+1 t+1))
+xlab(1(0.5)6, labsize(small) grid glw(medthin) glc(gs8))
+xmtick(1(0.0833)6, grid glw(vthin) glc(gs14))
+ylab(6(1)33, labsize(small) angle(0) grid glw(thin) glc(gs10) gextend)
+ymtick(6(0.2)33, grid glw(vthin) glc(gs14) gextend)
+xscale(range(1 6) noextend)
+yscale(range(6 33.1))
+legend(off)
+
+text(28.52 5.8 "98", size(1.8) bcolor(white))
+text(26.57 5.8 "95", size(1.8) bcolor(white))
+text(25.12 5.8 "90", size(1.8) bcolor(white))
+text(22.85 5.8 "75", size(1.8) bcolor(white))
+text(21 5.8 "50", size(1.8) bcolor(white))
+text(18.95 5.8 "25", size(1.8) bcolor(white))
+text(17.7 5.8 "10", size(1.8) bcolor(white))
+text(16.92 5.8 "5", size(1.8) bcolor(white))
+text(16.23 5.8 "2", size(1.8) bcolor(white))
+
+	
+text(6 6.05 "6", size(1.5) bcolor(white))
+text(7 6.05 "7", size(1.5) bcolor(white))
+text(8 6.05 "8", size(1.5) bcolor(white))
+text(9 6.05 "9", size(1.5) bcolor(white))
+text(10 6.06 "10", size(1.5) bcolor(white))
+text(11 6.06 "11", size(1.5) bcolor(white))
+text(12 6.06 "12", size(1.5) bcolor(white))
+text(13 6.06 "13", size(1.5) bcolor(white))
+text(14 6.06 "14", size(1.5) bcolor(white))
+text(15 6.06 "15", size(1.5) bcolor(white))
+text(16 6.06 "16", size(1.5) bcolor(white))
+text(17 6.06 "17", size(1.5) bcolor(white))
+text(18 6.06 "18", size(1.5) bcolor(white))
+text(19 6.06 "19", size(1.5) bcolor(white))
+text(20 6.06 "20", size(1.5) bcolor(white))
+text(21 6.07 "21", size(1.5) bcolor(white))
+text(22 6.07 "22", size(1.5) bcolor(white))
+text(23 6.07 "23", size(1.5) bcolor(white))
+text(24 6.07 "24", size(1.5) bcolor(white))
+text(25 6.07 "25", size(1.5) bcolor(white))
+text(26 6.07 "26", size(1.5) bcolor(white))
+text(27 6.07 "27", size(1.5) bcolor(white))
+text(28 6.07 "28", size(1.5) bcolor(white))
+text(29 6.07 "29", size(1.5) bcolor(white))
+text(30 6.07 "30", size(1.5) bcolor(white))
+text(31 6.07 "31", size(1.5) bcolor(white))
+text(32 6.07 "32", size(1.5) bcolor(white))
+text(33 6.07 "33", size(1.5) bcolor(white))
+
+
+plotregion(margin(zero))
+plotregion(lstyle(none))
+graphregion(margin(l r+2))
+
+xsize(8.5) ysize(11)
+
+;
+graph export print-wt-boys-gradual-1-6y.pdf, replace
+;
+#delimit cr
+
+*/
+
+***GIRLS PRINT WEIGHT 2-20 Years
+/*
+use gradual_graph_p, clear
+set scheme s1mono
+
+
+local s (line g_f_wt
+local agu if ag3==1 & ay<8.1
+local ago if ag3==1 & ay>=8
+local eo lw(medthick))
+local eu lw(medthin))
+local c color("216 27 96")
+
+
+#delimit ;
+sort ageyears;
+twoway
+
+`s'_z2neg ay `agu', lc("30 136 229") `eu'
+`s'_p5 ay `agu', lc("216 27 96")  `eu'
+`s'_p10 ay `agu', lc("0 77 64"*0.6)  `eu'
+`s'_p25 ay `agu', lc("255 140 0"*1.6)  `eu'
+`s'_p50 ay `agu', lc(black) `eu'
+`s'_p75 ay `agu', lc("255 140 0"*1.6)  `eu'
+`s'_p90 ay `agu', lc("0 77 64"*0.6) `eu'
+`s'_p95 ay `agu', lc("216 27 96")  `eu'
+`s'_z2 ay `agu', lc("30 136 229")  `eu'
+
+`s'_z2neg ay `ago', lc("30 136 229") `eo'
+`s'_p5 ay `ago', lc("216 27 96")  `eo'
+`s'_p10 ay `ago', lc("0 77 64"*0.6)  `eo'
+`s'_p25 ay `ago', lc("255 140 0"*1.6)  `eo'
+`s'_p50 ay `ago', lc(black) `eo'
+`s'_p75 ay `ago', lc("255 140 0"*1.6)  `eo'
+`s'_p90 ay `ago', lc("0 77 64"*0.6) `eo'
+`s'_p95 ay `ago', lc("216 27 96")  `eo'
+`s'_z2 ay `ago', lc("30 136 229")  `eo'
+
+,
+
+xtitle("Age (Years)", size(small) `c' )
+ytitle("Weight (kg)", size(small) `c' )
+title("{bf:Girls          Weight-for-Age}"  "Gradual WHO-CDC  2-19 Years", size(2.7) ring(0) bcolor(white %100) box color(black) l`c' lw(thick) linegap(2) margin(b+1 t+1))
+xlab(2(1)20, labsize(small) grid glw(medthin) glc(gs8))
+xmtick(2(0.5)20, grid glw(vthin) glc(gs14))
+ylab(10(10)100, labsize(small) angle(0) grid glw(thin) glc(gs10) gextend)
+ymtick(6(1)105, grid glw(vthin) glc(gs14) gextend)
+xscale(range(2 20) noextend)
+yscale(range(6 105))
+legend(off)
+
+text(94 19.5 "98", size(1.8) bcolor(white))
+text(83.7 19.5 "95", size(1.8) bcolor(white))
+text(76 19.5 "90", size(1.8) bcolor(white))
+text(67 19.5 "75", size(1.8) bcolor(white))
+text(59 19.5 "50", size(1.8) bcolor(white))
+text(53.5 19.5 "25", size(1.8) bcolor(white))
+text(49.7 19.5 "10", size(1.8) bcolor(white))
+text(47.3 19.5 "5", size(1.8) bcolor(white))
+text(45.38 19.5 "2", size(1.8) bcolor(white))
+	
+text(10 20.3 "10", size(1.5) bcolor(white))
+text(20 20.3 "20", size(1.5) bcolor(white))
+text(30 20.3 "30", size(1.5) bcolor(white))
+text(40 20.3 "40", size(1.5) bcolor(white))
+text(50 20.3 "50", size(1.5) bcolor(white))
+text(60 20.3 "60", size(1.5) bcolor(white))
+text(70 20.3 "70", size(1.5) bcolor(white))
+text(80 20.3 "80", size(1.5) bcolor(white))
+text(90 20.3 "90", size(1.5) bcolor(white))
+text(100 20.3 "100", size(1.5) bcolor(white))
+
+plotregion(margin(zero))
+plotregion(lstyle(none))
+graphregion(margin(l r+2))
+
+xsize(8.5) ysize(11)
+
+;
+graph export print-wt-girls-gradual-2-20y.pdf, replace
+;
+#delimit cr
+
+*/
+
+
+***BOYS PRINT WEIGHT 2-20 Years
+/*
+use gradual_graph_p, clear
+set scheme s1mono
+
+
+local s (line g_m_wt
+local agu if ag3==1 & ay<8.1
+local ago if ag3==1 & ay>=8
+local eo lw(medthick))
+local eu lw(medthin))
+local c color("30 136 229")
+
+#delimit ;
+sort ageyears;
+twoway
+
+`s'_z2neg ay `agu', lc("30 136 229") `eu'
+`s'_p5 ay `agu', lc("216 27 96")  `eu'
+`s'_p10 ay `agu', lc("0 77 64"*0.6)  `eu'
+`s'_p25 ay `agu', lc("255 140 0"*1.6) `eu'
+`s'_p50 ay `agu', lc(black) `eu'
+`s'_p75 ay `agu', lc("255 140 0"*1.6)  `eu'
+`s'_p90 ay `agu', lc("0 77 64"*0.6) `eu'
+`s'_p95 ay `agu', lc("216 27 96")  `eu'
+`s'_z2 ay `agu', lc("30 136 229")  `eu'
+
+`s'_z2neg ay `ago', lc("30 136 229") `eo'
+`s'_p5 ay `ago', lc("216 27 96")  `eo'
+`s'_p10 ay `ago', lc("0 77 64"*0.6)  `eo'
+`s'_p25 ay `ago', lc("255 140 0"*1.6)  `eo'
+`s'_p50 ay `ago', lc(black) `eo'
+`s'_p75 ay `ago', lc("255 140 0"*1.6)  `eo'
+`s'_p90 ay `ago', lc("0 77 64"*0.6) `eo'
+`s'_p95 ay `ago', lc("216 27 96")  `eo'
+`s'_z2 ay `ago', lc("30 136 229")  `eo'
+
+,
+
+xtitle("Age (Years)", size(small) `c' )
+ytitle("Weight (kg)", size(small) `c' )
+title("{bf:Boys           Weight-for-Age}"  "Gradual WHO-CDC  1-5 Years", size(2.7) ring(0) bcolor(white %100) box color(black) l`c' lw(thick) linegap(2) margin(b+1 t+1))
+xlab(2(1)20, labsize(small) grid glw(medthin) glc(gs8))
+xmtick(2(0.5)20, grid glw(vthin) glc(gs14))
+ylab(10(10)110, labsize(small) angle(0) grid glw(thin) glc(gs10) gextend)
+ymtick(6(1)115, grid glw(vthin) glc(gs14) gextend)
+xscale(range(2 20) noextend)
+yscale(range(6 115))
+legend(off)
+
+text(104 19.5 "98", size(1.8) bcolor(white))
+text(96.4 19.5 "95", size(1.8) bcolor(white))
+text(89.7 19.5 "90", size(1.8) bcolor(white))
+text(80 19.5 "75", size(1.8) bcolor(white))
+text(71.7 19.5 "50", size(1.8) bcolor(white))
+text(64.7 19.5 "25", size(1.8) bcolor(white))
+text(59.7 19.5 "10", size(1.8) bcolor(white))
+text(56.8 19.5 "5", size(1.8) bcolor(white))
+text(54.4 19.5 "2", size(1.8) bcolor(white))
+	
+text(10 20.3 "10", size(1.5) bcolor(white))
+text(20 20.3 "20", size(1.5) bcolor(white))
+text(30 20.3 "30", size(1.5) bcolor(white))
+text(40 20.3 "40", size(1.5) bcolor(white))
+text(50 20.3 "50", size(1.5) bcolor(white))
+text(60 20.3 "60", size(1.5) bcolor(white))
+text(70 20.3 "70", size(1.5) bcolor(white))
+text(80 20.3 "80", size(1.5) bcolor(white))
+text(90 20.3 "90", size(1.5) bcolor(white))
+text(100 20.3 "100", size(1.5) bcolor(white))
+text(110 20.3 "110", size(1.5) bcolor(white))
+
+
+plotregion(margin(zero))
+plotregion(lstyle(none))
+graphregion(margin(l r+2))
+
+xsize(8.5) ysize(11)
+
+;
+graph export print-wt-boys-gradual-2-20y.pdf, replace
+;
+#delimit cr
+
+*/
+
+*
+*
+*
+*
+*				HEIGHT
+*
+*
+*
+*
+*
+
+
+
+***GIRLS PRINT LENGTH/HEIGHT 0-36 months
+/*
+use gradual_graph_p, clear
+set scheme s1mono
+
+
+local s (line g_f_ht
+local agu if ag1==1 & ay<1.2
+local ago if ag1==1 & ay>=1
+local eo lw(medthick))
+local eu lw(medthin))
+local c color("216 27 96")
+
+
+#delimit ;
+sort ageyears;
+twoway
+
+
+`s'_z2neg am `agu', lc("30 136 229") `eu'
+`s'_p5 am `agu', lc("216 27 96")  `eu'
+`s'_p10 am `agu', lc("0 77 64"*0.6)  `eu'
+`s'_p25 am `agu', lc("255 140 0"*1.6)  `eu'
+`s'_p50 am `agu', lc(black) `eu'
+`s'_p75 am `agu', lc("255 140 0"*1.6)  `eu'
+`s'_p90 am `agu', lc("0 77 64"*0.6) `eu'
+`s'_p95 am `agu', lc("216 27 96")  `eu'
+`s'_z2 am `agu', lc("30 136 229")  `eu'
+
+`s'_z2neg am `ago', lc("30 136 229") `eo'
+`s'_p5 am `ago', lc("216 27 96")  `eo'
+`s'_p10 am `ago', lc("0 77 64"*0.6)  `eo'
+`s'_p25 am `ago', lc("255 140 0"*1.6)  `eo'
+`s'_p50 am `ago', lc(black) `eo'
+`s'_p75 am `ago', lc("255 140 0"*1.6)  `eo'
+`s'_p90 am `ago', lc("0 77 64"*0.6) `eo'
+`s'_p95 am `ago', lc("216 27 96")  `eo'
+`s'_z2 am `ago', lc("30 136 229")  `eo'
+
+,
+
+xtitle("Age (Months)", size(small) `c' )
+ytitle("Length/Height (cm)", size(small) `c' )
+title("{bf:Girls   Length/Height-for-Age}"  "Gradual WHO-CDC  0-36 Months", size(2.7) ring(0) bcolor(white %100) box color(black) lcolor("216 27 96") lw(thick) linegap(2) margin(b+1 t+1))
+xlab(0(3)36, labsize(small) grid glw(medthin) glc(gs8))
+xmtick(0(0.5)36, grid glw(vthin) glc(gs14))
+ylab(45(5)105, labsize(small) angle(0) grid glw(thin) glc(gs10) gextend)
+ymtick(44(1)105, grid glw(vthin) glc(gs14) gextend)
+xscale(range(0 36) noextend)
+yscale(range(44 106))
+legend(off)
+
+text(102.5 34.8 "98", size(1.8) bcolor(white))
+text(101 34.8 "95", size(1.8) bcolor(white))
+text(99.6 34.8 "90", size(1.8) bcolor(white))
+text(97.2 34.8 "75", size(1.8) bcolor(white))
+text(94.7 34.8 "50", size(1.8) bcolor(white))
+text(92.2 34.8 "25", size(1.8) bcolor(white))
+text(90 34.8 "10", size(1.8) bcolor(white))
+text(88.4 34.8 "5", size(1.8) bcolor(white))
+text(86.9 34.8 "2", size(1.8) bcolor(white))
+
+text(45 36.45 "45", size(1.5) bcolor(white))
+text(50 36.45 "50", size(1.5) bcolor(white))
+text(55 36.45 "55", size(1.5) bcolor(white))
+text(60 36.45 "60", size(1.5) bcolor(white))
+text(65 36.45 "65", size(1.5) bcolor(white))
+text(70 36.45 "70", size(1.5) bcolor(white))
+text(75 36.45 "75", size(1.5) bcolor(white))
+text(80 36.45 "80", size(1.5) bcolor(white))
+text(85 36.45 "85", size(1.5) bcolor(white))
+text(90 36.45 "90", size(1.5) bcolor(white))
+text(95 36.45 "95", size(1.5) bcolor(white))
+text(100 36.8 "100", size(1.5) bcolor(white))
+text(105 36.58 "105", size(1.5) bcolor(white))
+
+plotregion(margin(zero))
+plotregion(lstyle(none))
+graphregion(margin(l r+2))
+
+xsize(8.5) ysize(11)
+
+;
+graph export print-lt-ht-girls-gradual-0-36m.pdf, replace
+;
+#delimit cr
+
+*/
+
+
+***BOYS PRINT LENGTH/HEIGHT 0-36 months
+/*
+use gradual_graph_p, clear
+set scheme s1mono
+
+
+local s (line g_m_ht
+local agu if ag1==1 & ay<1.2
+local ago if ag1==1 & ay>=1
+local eo lw(medthick))
+local eu lw(medthin))
+local c color("30 136 229")
+
+#delimit ;
+sort ageyears;
+twoway
+
+
+`s'_z2neg am `agu', lc("30 136 229") `eu'
+`s'_p5 am `agu', lc("216 27 96")  `eu'
+`s'_p10 am `agu', lc("0 77 64"*0.6)  `eu'
+`s'_p25 am `agu', lc("255 140 0"*1.6)  `eu'
+`s'_p50 am `agu', lc(black) `eu'
+`s'_p75 am `agu', lc("255 140 0"*1.6)  `eu'
+`s'_p90 am `agu', lc("0 77 64"*0.6) `eu'
+`s'_p95 am `agu', lc("216 27 96")  `eu'
+`s'_z2 am `agu', lc("30 136 229")  `eu'
+
+`s'_z2neg am `ago', lc("30 136 229") `eo'
+`s'_p5 am `ago', lc("216 27 96")  `eo'
+`s'_p10 am `ago', lc("0 77 64"*0.6)  `eo'
+`s'_p25 am `ago', lc("255 140 0"*1.6)  `eo'
+`s'_p50 am `ago', lc(black) `eo'
+`s'_p75 am `ago', lc("255 140 0"*1.6)  `eo'
+`s'_p90 am `ago', lc("0 77 64"*0.6) `eo'
+`s'_p95 am `ago', lc("216 27 96")  `eo'
+`s'_z2 am `ago', lc("30 136 229")  `eo'
+
+,
+
+xtitle("Age (Months)", size(small) `c' )
+ytitle("Length/Height (cm)", size(small) `c' )
+title("{bf:Boys   Length/Height-for-Age}"  "Gradual WHO-CDC  0-36 Months", size(2.7) ring(0) bcolor(white %100) box color(black) lcolor("30 136 229") lw(thick) linegap(2) margin(b+1 t+1))
+xlab(0(3)36, labsize(small) grid glw(medthin) glc(gs8))
+xmtick(0(0.5)36, grid glw(vthin) glc(gs14))
+ylab(45(5)105, labsize(small) angle(0) grid glw(thin) glc(gs10) gextend)
+ymtick(44(1)105, grid glw(vthin) glc(gs14) gextend)
+xscale(range(0 36) noextend)
+yscale(range(44 106))
+legend(off)
+
+text(103.5 34.8 "98", size(1.8) bcolor(white))
+text(102 34.8 "95", size(1.8) bcolor(white))
+text(100.6 34.8 "90", size(1.8) bcolor(white))
+text(98.4 34.8 "75", size(1.8) bcolor(white))
+text(96 34.8 "50", size(1.8) bcolor(white))
+text(93.5 34.8 "25", size(1.8) bcolor(white))
+text(91.3 34.8 "10", size(1.8) bcolor(white))
+text(89.6 34.8 "5", size(1.8) bcolor(white))
+text(88.3 34.8 "2", size(1.8) bcolor(white))
+
+text(45 36.45 "45", size(1.5) bcolor(white))
+text(50 36.45 "50", size(1.5) bcolor(white))
+text(55 36.45 "55", size(1.5) bcolor(white))
+text(60 36.45 "60", size(1.5) bcolor(white))
+text(65 36.45 "65", size(1.5) bcolor(white))
+text(70 36.45 "70", size(1.5) bcolor(white))
+text(75 36.45 "75", size(1.5) bcolor(white))
+text(80 36.45 "80", size(1.5) bcolor(white))
+text(85 36.45 "85", size(1.5) bcolor(white))
+text(90 36.45 "90", size(1.5) bcolor(white))
+text(95 36.45 "95", size(1.5) bcolor(white))
+text(100 36.8 "100", size(1.5) bcolor(white))
+text(105 36.58 "105", size(1.5) bcolor(white))
+
+plotregion(margin(zero))
+plotregion(lstyle(none))
+graphregion(margin(l r+2))
+
+xsize(8.5) ysize(11)
+
+;
+graph export print-lt-ht-boys-gradual-0-36m.pdf, replace
+;
+#delimit cr
+
+*/
+
+***GIRLS PRINT LENGTH/HEIGHT 1-6 Years
+/*
+use gradual_graph_p, clear
+set scheme s1mono
+
+local s (line g_f_ht
+local ag if ag2==1
+local e lw (medthick))
+local labc labcolor("216 27 96")
+local c color("216 27 96")
+
+
+#delimit ;
+sort ageyears;
+twoway
+
+`s'_z2neg ay `ag', lc("30 136 229") `e'
+`s'_p5 ay `ag', lc("216 27 96")  `e'
+`s'_p10 ay `ag', lc("0 77 64"*0.6)  `e'
+`s'_p25 ay `ag', lc("255 140 0"*1.6)  `e'
+`s'_p50 ay `ag', lc(black) `e'
+`s'_p75 ay `ag', lc("255 140 0"*1.6) `e'
+`s'_p90 ay `ag', lc("0 77 64"*0.6) `e'
+`s'_p95 ay `ag', lc("216 27 96")  `e'
+`s'_z2 ay `ag', lc("30 136 229")  `e'
+
+,
+
+xtitle("Age (Years)", size(small) `c' )
+ytitle("Length/Height (cm)", size(small) `c' )
+title("{bf:Girls   Length/Height-for-Age}"  "Gradual WHO-CDC  1-6 Years", size(2.7) ring(0) bcolor(white %100) box color(black) lcolor("216 27 96") lw(thick) linegap(2) margin(b+1 t+1))
+xlab(1(0.5)6, labsize(small) grid glw(medthin) glc(gs8))
+xmtick(1(0.0833)6, grid glw(vthin) glc(gs14))
+ylab(70(5)132, labsize(small) angle(0) grid glw(thin) glc(gs10) gextend)
+ymtick(67(1)132, grid glw(vthin) glc(gs14) gextend)
+xscale(range(1 6) noextend)
+yscale(range(67 132))
+legend(off)
+
+text(125.2 5.8 "98", size(1.8) bcolor(white))
+text(123 5.8 "95", size(1.8) bcolor(white))
+text(121.2 5.8 "90", size(1.8) bcolor(white))
+text(118 5.8 "75", size(1.8) bcolor(white))
+text(114.7 5.8 "50", size(1.8) bcolor(white))
+text(111.3 5.8 "25", size(1.8) bcolor(white))
+text(108.6 5.8 "10", size(1.8) bcolor(white))
+text(106.2 5.8 "5", size(1.8) bcolor(white))
+text(104.6 5.8 "2", size(1.8) bcolor(white))
+
+text(70 6.1 "70", size(1.5) bcolor(white) )
+text(75 6.1 "75", size(1.5) bcolor(white) )
+text(80 6.1 "80", size(1.5) bcolor(white) )
+text(85 6.1 "85", size(1.5) bcolor(white) )
+text(90 6.1 "90", size(1.5) bcolor(white) )
+text(95 6.1 "95", size(1.5) bcolor(white) )
+text(100 6.15 "100", size(1.5) bcolor(white) )
+text(105 6.15 "105", size(1.5) bcolor(white) )
+text(110 6.15 "110", size(1.5) bcolor(white) )
+text(115 6.15 "115", size(1.5) bcolor(white) )
+text(120 6.15 "120", size(1.5) bcolor(white) )
+text(125 6.15 "125", size(1.5) bcolor(white) )
+text(130 6.15 "130", size(1.5) bcolor(white) )
+
+
+plotregion(margin(zero))
+plotregion(lstyle(none))
+graphregion(margin(l r+2))
+
+xsize(8.5) ysize(11)
+
+;
+graph export print-lt-ht-girls-gradual-1-6y.pdf, replace
+;
+#delimit cr
+*/
+
+***BOYS PRINT LENGTH/HEIGHT 1-6 Years
+/*
+use gradual_graph_p, clear
+set scheme s1mono
+
+local s (line g_m_ht
+local ag if ag2==1
+local e lw (medthick))
+local c color("30 136 229")
+
+#delimit ;
+sort ageyears;
+twoway
+
+`s'_z2neg ay `ag', lc("30 136 229") `e'
+`s'_p5 ay `ag', lc("216 27 96")  `e'
+`s'_p10 ay `ag', lc("0 77 64"*0.6)  `e'
+`s'_p25 ay `ag', lc("255 140 0"*1.6)  `e'
+`s'_p50 ay `ag', lc(black) `e'
+`s'_p75 ay `ag', lc("255 140 0"*1.6)  `e'
+`s'_p90 ay `ag', lc("0 77 64"*0.6) `e'
+`s'_p95 ay `ag', lc("216 27 96")  `e'
+`s'_z2 ay `ag', lc("30 136 229")  `e'
+
+,
+
+xtitle("Age (Years)", size(small) `c' )
+ytitle("Length/Height (cm)", size(small) `c' )
+title("{bf:Boys   Length/Height-for-Age}"  "Gradual WHO-CDC  0-36 Months", size(2.7) ring(0) bcolor(white %100) box color(black) lcolor("30 136 229") lw(thick) linegap(2) margin(b+1 t+1))
+xlab(1(0.5)6, labsize(small) grid glw(medthin) glc(gs8))
+xmtick(1(0.0833)6, grid glw(vthin) glc(gs14))
+ylab(70(5)130, labsize(small) angle(0) grid glw(thin) glc(gs10) gextend)
+ymtick(69(1)130, grid glw(vthin) glc(gs14) gextend)
+xscale(range(1 6) noextend)
+yscale(range(69 130))
+legend(off)
+
+text(125.2 5.8 "98", size(1.8) bcolor(white))
+text(123.1 5.8 "95", size(1.8) bcolor(white))
+text(121.5 5.8 "90", size(1.8) bcolor(white))
+text(118.8 5.8 "75", size(1.8) bcolor(white))
+text(115.5 5.8 "50", size(1.8) bcolor(white))
+text(112 5.8 "25", size(1.8) bcolor(white))
+text(108.8 5.8 "10", size(1.8) bcolor(white))
+text(106.8 5.8 "5", size(1.8) bcolor(white))
+text(104.9 5.8 "2", size(1.8) bcolor(white))
+
+text(70 6.1 "70", size(1.5) bcolor(white) )
+text(75 6.1 "75", size(1.5) bcolor(white) )
+text(80 6.1 "80", size(1.5) bcolor(white) )
+text(85 6.1 "85", size(1.5) bcolor(white) )
+text(90 6.1 "90", size(1.5) bcolor(white) )
+text(95 6.1 "95", size(1.5) bcolor(white) )
+text(100 6.15 "100", size(1.5) bcolor(white) )
+text(105 6.15 "105", size(1.5) bcolor(white) )
+text(110 6.15 "110", size(1.5) bcolor(white) )
+text(115 6.15 "115", size(1.5) bcolor(white) )
+text(120 6.15 "120", size(1.5) bcolor(white) )
+text(125 6.15 "125", size(1.5) bcolor(white) )
+text(130 6.15 "130", size(1.5) bcolor(white) )
+
+
+plotregion(margin(zero))
+plotregion(lstyle(none))
+graphregion(margin(l r+2))
+
+xsize(8.5) ysize(11)
+
+;
+graph export print-lt-ht-boys-gradual-1-6y.pdf, replace
+;
+#delimit cr
+
+*/
+
+
+***GIRLS PRINT LENGTH/HEIGHT 2-20 Years
+/*
+use gradual_graph_p, clear
+set scheme s1mono
+
+
+local s (line g_f_ht
+local agu if ag3==1 & ay<8.1
+local ago if ag3==1 & ay>=8
+local eo lw(medthick))
+local eu lw(medthin))
+local c color("216 27 96")
+
+#delimit ;
+sort ageyears;
+twoway
+
+`s'_z2neg ay `agu', lc("30 136 229") `eu'
+`s'_p5 ay `agu', lc("216 27 96")  `eu'
+`s'_p10 ay `agu', lc("0 77 64"*0.6)  `eu'
+`s'_p25 ay `agu', lc("255 140 0"*1.6)  `eu'
+`s'_p50 ay `agu', lc(black) `eu'
+`s'_p75 ay `agu', lc("255 140 0"*1.6)  `eu'
+`s'_p90 ay `agu', lc("255 140 0"*1.6) `eu'
+`s'_p95 ay `agu', lc("216 27 96")  `eu'
+`s'_z2 ay `agu', lc("30 136 229")  `eu'
+
+`s'_z2neg ay `ago', lc("30 136 229") `eo'
+`s'_p5 ay `ago', lc("216 27 96")  `eo'
+`s'_p10 ay `ago', lc("0 77 64"*0.6)  `eo'
+`s'_p25 ay `ago', lc("255 140 0"*1.6)  `eo'
+`s'_p50 ay `ago', lc(black) `eo'
+`s'_p75 ay `ago', lc("255 140 0"*1.6)  `eo'
+`s'_p90 ay `ago', lc("0 77 64"*0.6) `eo'
+`s'_p95 ay `ago', lc("216 27 96")  `eo'
+`s'_z2 ay `ago', lc("30 136 229")  `eo'
+
+,
+
+xtitle("Age (Years)", size(small) `c' )
+ytitle("Height (cm)", size(small) `c' )
+title("{bf:Girls   Length/Height-for-Age}"  "Gradual WHO-CDC  2-20 Years", size(2.7) ring(0) bcolor(white %100) box color(black) l`c' lw(thick) linegap(2) margin(b+1 t+1) bmargin(l+4) pos(11))
+xlab(2(1)20, labsize(small) grid glw(medthin) glc(gs8))
+xmtick(2(0.5)20, grid glw(vthin) glc(gs14))
+ylab(80(5)180, labsize(small) angle(0) grid glw(thin) glc(gs10) gextend)
+ymtick(76(1)184, grid glw(vthin) glc(gs14) gextend)
+xscale(range(2 20) noextend)
+yscale(range(76 184))
+legend(off)
+
+text(177.3 19.6 "98", size(1.8) bcolor(white))
+text(175 19.6 "95", size(1.8) bcolor(white))
+text(172.7 19.6 "90", size(1.8) bcolor(white))
+text(169 19.6 "75", size(1.8) bcolor(white))
+text(165 19.6 "50", size(1.8) bcolor(white))
+text(160.2 19.6 "25", size(1.8) bcolor(white))
+text(156.2 19.6 "10", size(1.8) bcolor(white))
+text(154 19.6 "5", size(1.8) bcolor(white))
+text(151.5 19.6 "2", size(1.8) bcolor(white))
+
+text(80 20.3 "80", size(1.5) bcolor(white) )
+text(85 20.3 "85", size(1.5) bcolor(white) )
+text(90 20.3 "90", size(1.5) bcolor(white) )
+text(95 20.3 "95", size(1.5) bcolor(white) )
+text(100 20.5 "100", size(1.5) bcolor(white) )
+text(105 20.5 "105", size(1.5) bcolor(white) )
+text(110 20.5 "110", size(1.5) bcolor(white) )
+text(115 20.5 "115", size(1.5) bcolor(white) )
+text(120 20.5 "120", size(1.5) bcolor(white) )
+text(125 20.5 "125", size(1.5) bcolor(white) )
+text(130 20.5 "130", size(1.5) bcolor(white) )
+text(135 20.5 "135", size(1.5) bcolor(white) )
+text(140 20.5 "140", size(1.5) bcolor(white) )
+text(145 20.5 "145", size(1.5) bcolor(white) )
+text(150 20.5 "150", size(1.5) bcolor(white) )
+text(155 20.5 "155", size(1.5) bcolor(white) )
+text(160 20.5 "160", size(1.5) bcolor(white) )
+text(165 20.5 "165", size(1.5) bcolor(white) )
+text(170 20.5 "170", size(1.5) bcolor(white) )
+text(175 20.5 "175", size(1.5) bcolor(white) )
+text(180 20.5 "180", size(1.5) bcolor(white) )
+
+plotregion(margin(zero))
+plotregion(lstyle(none))
+graphregion(margin(l r+2))
+
+xsize(8.5) ysize(11)
+
+;
+graph export print-lt-ht-girls-gradual-2-20y.pdf, replace
+;
+#delimit cr
+
+*/
+
+***BOYS PRINT LENGTH/HEIGHT 2-20 Years
+/*
+use gradual_graph_p, clear
+set scheme s1mono
+
+
+local s (line g_m_ht
+local agu if ag3==1 & ay<8.1
+local ago if ag3==1 & ay>=8
+local eo lw(medthick))
+local eu lw(medthin))
+local c color("30 136 229")
+
+#delimit ;
+sort ageyears;
+twoway
+
+`s'_z2neg ay `agu', lc("30 136 229") `eu'
+`s'_p5 ay `agu', lc("216 27 96")  `eu'
+`s'_p10 ay `agu', lc("0 77 64"*0.6)  `eu'
+`s'_p25 ay `agu', lc("255 140 0"*1.6)  `eu'
+`s'_p50 ay `agu', lc(black) `eu'
+`s'_p75 ay `agu', lc("255 140 0"*1.6)  `eu'
+`s'_p90 ay `agu', lc("0 77 64"*0.6) `eu'
+`s'_p95 ay `agu', lc("216 27 96")  `eu'
+`s'_z2 ay `agu', lc("30 136 229")  `eu'
+
+`s'_z2neg ay `ago', lc("30 136 229") `eo'
+`s'_p5 ay `ago', lc("216 27 96")  `eo'
+`s'_p10 ay `ago', lc("0 77 64"*0.6)  `eo'
+`s'_p25 ay `ago', lc("255 140 0"*1.6)  `eo'
+`s'_p50 ay `ago', lc(black) `eo'
+`s'_p75 ay `ago', lc("255 140 0"*1.6)  `eo'
+`s'_p90 ay `ago', lc("0 77 64"*0.6) `eo'
+`s'_p95 ay `ago', lc("216 27 96")  `eo'
+`s'_z2 ay `ago', lc("30 136 229")  `eo'
+
+,
+
+xtitle("Age (Years)", size(small) `c' )
+ytitle("Height (cm)", size(small) `c' )
+title("{bf:Boys    Length/Height-for-Age}"  "Gradual WHO-CDC  2-20 Years", size(2.7) ring(0) bcolor(white %100) box color(black) l`c' lw(thick) linegap(2) margin(b+1 t+1) bmargin(l+4) pos(11))
+xlab(2(1)20, labsize(small) grid glw(medthin) glc(gs8))
+xmtick(2(0.5)20, grid glw(vthin) glc(gs14))
+ylab(80(5)195, labsize(small) angle(0) grid glw(thin) glc(gs10) gextend)
+ymtick(79(1)196, grid glw(vthin) glc(gs14) gextend)
+xscale(range(2 20) noextend)
+yscale(range(79 196))
+legend(off)
+
+text(192 19.6 "98", size(1.8) bcolor(white))
+text(189.6 19.6 "95", size(1.8) bcolor(white))
+text(187.1 19.6 "90", size(1.8) bcolor(white))
+text(182.9 19.6 "75", size(1.8) bcolor(white))
+text(178 19.6 "50", size(1.8) bcolor(white))
+text(173 19.6 "25", size(1.8) bcolor(white))
+text(168.8 19.6 "10", size(1.8) bcolor(white))
+text(166.1 19.6 "5", size(1.8) bcolor(white))
+text(163.5 19.6 "2", size(1.8) bcolor(white))
+
+text(80 20.3 "80", size(1.5) bcolor(white) )
+text(85 20.3 "85", size(1.5) bcolor(white) )
+text(90 20.3 "90", size(1.5) bcolor(white) )
+text(95 20.3 "95", size(1.5) bcolor(white) )
+text(100 20.5 "100", size(1.5) bcolor(white) )
+text(105 20.5 "105", size(1.5) bcolor(white) )
+text(110 20.5 "110", size(1.5) bcolor(white) )
+text(115 20.5 "115", size(1.5) bcolor(white) )
+text(120 20.5 "120", size(1.5) bcolor(white) )
+text(125 20.5 "125", size(1.5) bcolor(white) )
+text(130 20.5 "130", size(1.5) bcolor(white) )
+text(135 20.5 "135", size(1.5) bcolor(white) )
+text(140 20.5 "140", size(1.5) bcolor(white) )
+text(145 20.5 "145", size(1.5) bcolor(white) )
+text(150 20.5 "150", size(1.5) bcolor(white) )
+text(155 20.5 "155", size(1.5) bcolor(white) )
+text(160 20.5 "160", size(1.5) bcolor(white) )
+text(165 20.5 "165", size(1.5) bcolor(white) )
+text(170 20.5 "170", size(1.5) bcolor(white) )
+text(175 20.5 "175", size(1.5) bcolor(white) )
+text(180 20.5 "180", size(1.5) bcolor(white) )
+text(185 20.5 "185", size(1.5) bcolor(white) )
+text(190 20.5 "190", size(1.5) bcolor(white) )
+text(195 20.5 "195", size(1.5) bcolor(white) )
+
+
+plotregion(margin(zero))
+plotregion(lstyle(none))
+graphregion(margin(l r+2))
+
+xsize(8.5) ysize(11)
+
+;
+graph export print-lt-ht-boys-gradual-2-20y.pdf, replace
+;
+#delimit cr
+
+*/	
+	
+	
+	
+	
+*
+*
+*
+*
+*				BMI
+*
+*
+*
+*
+*
+	
+	
+	
+*****
+*****								PRINT GRADUAL BMI Figures  Girls							*****************************
+*****
+
+***GIRLS PRINT BMI 0-36 months
+/*
+use gradual_graph_p, clear
+set scheme s1mono
+
+local s (line g_f_bmi
+local agu if ag1==1 & ay<1.2
+local ago if ag1==1 & ay>=1
+local eo lw(medthick))
+local eu lw(medthin))
+local c color("216 27 96")
+
+
+#delimit ;
+sort ageyears;
+twoway
+
+`s'_z2neg am `agu', lc("30 136 229") `eu'
+`s'_p5 am `agu', lc("216 27 96")  `eu'
+`s'_p10 am `agu', lc("0 77 64"*0.6)  `eu'
+`s'_p25 am `agu', lc("255 140 0"*1.6)  `eu'
+`s'_p50 am `agu', lc(black) `eu'
+`s'_p75 am `agu', lc("255 140 0"*1.6)  `eu'
+`s'_p90 am `agu', lc("0 77 64"*0.6) `eu'
+`s'_p95 am `agu', lc("216 27 96")  `eu'
+`s'_z2 am `agu', lc("30 136 229")  `eu'
+
+`s'_z2neg am `ago', lc("30 136 229") `eo'
+`s'_p5 am `ago', lc("216 27 96")  `eo'
+`s'_p10 am `ago', lc("0 77 64"*0.6)  `eo'
+`s'_p25 am `ago', lc("255 140 0"*1.6)  `eo'
+`s'_p50 am `ago', lc(black) `eo'
+`s'_p75 am `ago', lc("255 140 0"*1.6)  `eo'
+`s'_p90 am `ago', lc("0 77 64"*0.6) `eo'
+`s'_p95 am `ago', lc("216 27 96")  `eo'
+`s'_z2 am `ago', lc("30 136 229")  `eo'
+
+,
+
+xtitle("Age (Months)", size(small) `c' )
+ytitle("Body Mass Index (kg/m{superscript: 2})", size(small) `c' )
+title("{bf:Girls          BMI-for-Age}"  "Gradual WHO-CDC  0-36 Months", size(2.7) ring(0) bcolor(white %100) box color(black) l`c' lw(thick) linegap(2) margin(b+1 t+1 r+4) bmargin(r+4) pos(1))
+xlab(0(3)36, labsize(small) grid glw(medthin) glc(gs8))
+xmtick(0(0.5)36, grid glw(vthin) glc(gs14))
+ylab(10(1)22, labsize(small) angle(0) grid glw(thin) glc(gs10) gextend)
+ytick(10.5(1)22.5, grid glw(thin) glc(gs10) gextend)
+ymtick(9.8(0.2)22.2, grid glw(vthin) glc(gs14) gextend)
+xscale(range(0 36) noextend)
+yscale(range(9.8 22.2))
+legend(off)
+
+text(19 34.8 "98", size(1.8) bcolor(white))
+text(18.2 34.8 "95", size(1.8) bcolor(white))
+text(17.68 34.8 "90", size(1.8) bcolor(white))
+text(16.65 34.8 "75", size(1.8) bcolor(white))
+text(15.7 34.8 "50", size(1.8) bcolor(white))
+text(14.9 34.8 "25", size(1.8) bcolor(white))
+text(14.2 34.8 "10", size(1.8) bcolor(white))
+text(13.85 34.8 "5", size(1.8) bcolor(white))
+text(13.45 34.8 "2", size(1.8) bcolor(white))
+
+
+text(10 36.38 "10", size(1.5) bcolor(white))
+text(11 36.38 "11", size(1.5) bcolor(white))
+text(12 36.38 "12", size(1.5) bcolor(white))
+text(13 36.38 "13", size(1.5) bcolor(white))
+text(14 36.38 "14", size(1.5) bcolor(white))
+text(15 36.38 "15", size(1.5) bcolor(white))
+text(16 36.38 "16", size(1.5) bcolor(white))
+text(17 36.38 "17", size(1.5) bcolor(white))
+text(18 36.38 "18", size(1.5) bcolor(white))
+text(19 36.38 "19", size(1.5) bcolor(white))
+text(20 36.38 "20", size(1.5) bcolor(white))
+text(21 36.38 "21", size(1.5) bcolor(white))
+text(22 36.38 "22", size(1.5) bcolor(white))
+
+plotregion(margin(zero))
+plotregion(lstyle(none))
+graphregion(margin(l r+2))
+
+xsize(8.5) ysize(11)
+
+;
+graph export print-bmi-girls-gradual-0-36m.pdf, replace
+;
+#delimit cr
+
+*/
+	
+
+***BOYS PRINT BMI 0-36 months
+/*
+use gradual_graph_p, clear
+set scheme s1mono
+
+local s (line g_m_bmi
+local agu if ag1==1 & ay<1.2
+local ago if ag1==1 & ay>=1
+local eo lw(medthick))
+local eu lw(medthin))
+local c color("30 136 229")
+
+
+#delimit ;
+sort ageyears;
+twoway
+
+`s'_z2neg am `agu', lc("30 136 229") `eu'
+`s'_p5 am `agu', lc("216 27 96")  `eu'
+`s'_p10 am `agu', lc("0 77 64"*0.6)  `eu'
+`s'_p25 am `agu', lc("255 140 0"*1.6)  `eu'
+`s'_p50 am `agu', lc(black) `eu'
+`s'_p75 am `agu', lc("255 140 0"*1.6)  `eu'
+`s'_p90 am `agu', lc("0 77 64"*0.6) `eu'
+`s'_p95 am `agu', lc("216 27 96")  `eu'
+`s'_z2 am `agu', lc("30 136 229")  `eu'
+
+`s'_z2neg am `ago', lc("30 136 229") `eo'
+`s'_p5 am `ago', lc("216 27 96")  `eo'
+`s'_p10 am `ago', lc("0 77 64"*0.6)  `eo'
+`s'_p25 am `ago', lc("255 140 0"*1.6)  `eo'
+`s'_p50 am `ago', lc(black) `eo'
+`s'_p75 am `ago', lc("255 140 0"*1.6)  `eo'
+`s'_p90 am `ago', lc("0 77 64"*0.6) `eo'
+`s'_p95 am `ago', lc("216 27 96")  `eo'
+`s'_z2 am `ago', lc("30 136 229")  `eo'
+
+,
+
+xtitle("Age (Months)", size(small) `c' )
+ytitle("Body Mass Index (kg/m{superscript: 2})", size(small) `c' )
+title("{bf:Boys           BMI-for-Age}"  "Gradual WHO-CDC  0-36 Months", size(2.7) ring(0) bcolor(white %100) box color(black) l`c' lw(thick) linegap(2) margin(b+1 t+1 r+4) bmargin(r+4) pos(1))
+xlab(0(3)36, labsize(small) grid glw(medthin) glc(gs8))
+xmtick(0(0.5)36, grid glw(vthin) glc(gs14))
+ylab(10(1)22, labsize(small) angle(0) grid glw(thin) glc(gs10) gextend)
+ytick(10.5(1)22.5, grid glw(thin) glc(gs10) gextend)
+ymtick(9.8(0.2)22.2, grid glw(vthin) glc(gs14) gextend)
+xscale(range(0 36) noextend)
+yscale(range(9.8 22.2))
+legend(off)
+
+text(18.95 34.8 "98", size(1.8) bcolor(white))
+text(18.2 34.8 "95", size(1.8) bcolor(white))
+text(17.62 34.8 "90", size(1.8) bcolor(white))
+text(16.8 34.8 "75", size(1.8) bcolor(white))
+text(15.94 34.8 "50", size(1.8) bcolor(white))
+text(15.14 34.8 "25", size(1.8) bcolor(white))
+text(14.45 34.8 "10", size(1.8) bcolor(white))
+text(14.15 34.8 "5", size(1.8) bcolor(white))
+text(13.77 34.8 "2", size(1.8) bcolor(white))
+
+
+text(10 36.38 "10", size(1.5) bcolor(white))
+text(11 36.38 "11", size(1.5) bcolor(white))
+text(12 36.38 "12", size(1.5) bcolor(white))
+text(13 36.38 "13", size(1.5) bcolor(white))
+text(14 36.38 "14", size(1.5) bcolor(white))
+text(15 36.38 "15", size(1.5) bcolor(white))
+text(16 36.38 "16", size(1.5) bcolor(white))
+text(17 36.38 "17", size(1.5) bcolor(white))
+text(18 36.38 "18", size(1.5) bcolor(white))
+text(19 36.38 "19", size(1.5) bcolor(white))
+text(20 36.38 "20", size(1.5) bcolor(white))
+text(21 36.38 "21", size(1.5) bcolor(white))
+text(22 36.38 "22", size(1.5) bcolor(white))
+
+plotregion(margin(zero))
+plotregion(lstyle(none))
+graphregion(margin(l r+2))
+
+xsize(8.5) ysize(11)
+
+;
+graph export print-bmi-boys-gradual-0-36m.pdf, replace
+;
+#delimit cr
+
+*/
+	
+***GIRLS PRINT BMI 1-6 Years
+/*
+use gradual_graph_p, clear
+set scheme s1mono
+
+local s (line g_f_bmi
+local ag if ag2==1
+local e lw (medthick))
+local c color("216 27 96")
+
+
+#delimit ;
+sort ageyears;
+twoway
+
+`s'_z2neg ay `ag', lc("30 136 229") `e'
+`s'_p5 ay `ag', lc("216 27 96")  `e'
+`s'_p10 ay `ag', lc("0 77 64"*0.6)  `e'
+`s'_p25 ay `ag', lc("255 140 0"*1.6)  `e'
+`s'_p50 ay `ag', lc(black) `e'
+`s'_p75 ay `ag', lc("255 140 0"*1.6)  `e'
+`s'_p90 ay `ag', lc("0 77 64"*0.6) `e'
+`s'_p95 ay `ag', lc("216 27 96")  `e'
+`s'_z2 ay `ag', lc("30 136 229")  `e'
+
+,
+
+xtitle("Age (Years)", size(small) `c' )
+ytitle("Body Mass Index (kg/m{superscript: 2})", size(small) `c' )
+title("{bf:Girls          BMI-for-Age}"  "Gradual WHO-CDC  1-6 Years", size(2.7) ring(0) bcolor(white %100) box color(black) l`c' lw(thick) linegap(2) margin(b+1 t+1 l+4) bmargin(l+4) pos(11))
+xlab(1(0.5)6, labsize(small) grid glw(medthin) glc(gs8))
+xmtick(1(0.0833)6, grid glw(vthin) glc(gs14))
+ylab(12(1)24, labsize(small) angle(0) grid glw(thin) glc(gs10) gextend)
+ytick(12.5(1)23.5, grid glw(thin) glc(gs10) gextend)
+ymtick(12(0.1)24, grid glw(vthin) glc(gs14) gextend)
+xscale(range(1 6) noextend)
+yscale(range(11.8 24.2))
+legend(off)
+
+text(21.15 5.8 "98", size(1.8) bcolor(white))
+text(18.9 5.8 "95", size(1.8) bcolor(white))
+text(17.77 5.8 "90", size(1.8) bcolor(white))
+text(16.45 5.8 "75", size(1.8) bcolor(white))
+text(15.35 5.8 "50", size(1.8) bcolor(white))
+text(14.57 5.8 "25", size(1.8) bcolor(white))
+text(13.93 5.8 "10", size(1.8) bcolor(white))
+text(13.6 5.8 "5", size(1.8) bcolor(white))
+text(13.3 5.8 "2", size(1.8) bcolor(white))
+
+text(12 6.06 "12", size(1.5) bcolor(white))
+text(13 6.06 "13", size(1.5) bcolor(white))
+text(14 6.06 "14", size(1.5) bcolor(white))
+text(15 6.06 "15", size(1.5) bcolor(white))
+text(16 6.06 "16", size(1.5) bcolor(white))
+text(17 6.06 "17", size(1.5) bcolor(white))
+text(18 6.06 "18", size(1.5) bcolor(white))
+text(19 6.06 "19", size(1.5) bcolor(white))
+text(20 6.06 "20", size(1.5) bcolor(white))
+text(21 6.07 "21", size(1.5) bcolor(white))
+text(22 6.07 "22", size(1.5) bcolor(white))
+text(23 6.07 "23", size(1.5) bcolor(white))
+text(24 6.07 "24", size(1.5) bcolor(white))
+
+
+plotregion(margin(zero))
+plotregion(lstyle(none))
+graphregion(margin(l r+2))
+
+xsize(8.5) ysize(11)
+
+;
+graph export print-bmi-girls-gradual-1-6y.pdf, replace
+;
+#delimit cr
+
+*/	
+	
+	
+***BOYS PRINT BMI 1-6 Years
+/*
+use gradual_graph_p, clear
+set scheme s1mono
+
+local s (line g_m_bmi
+local ag if ag2==1
+local e lw (medthick))
+local c color("30 136 229")
+
+
+#delimit ;
+sort ageyears;
+twoway
+
+`s'_z2neg ay `ag', lc("30 136 229") `e'
+`s'_p5 ay `ag', lc("216 27 96")  `e'
+`s'_p10 ay `ag', lc("0 77 64"*0.6)  `e'
+`s'_p25 ay `ag', lc("255 140 0"*1.6)  `e'
+`s'_p50 ay `ag', lc(black) `e'
+`s'_p75 ay `ag', lc("255 140 0"*1.6)  `e'
+`s'_p90 ay `ag', lc("0 77 64"*0.6) `e'
+`s'_p95 ay `ag', lc("216 27 96")  `e'
+`s'_z2 ay `ag', lc("30 136 229")  `e'
+
+,
+
+xtitle("Age (Years)", size(small) `c' )
+ytitle("Body Mass Index (kg/m{superscript: 2})", size(small) `c' )
+title("{bf:Boys           BMI-for-Age}"  "Gradual WHO-CDC  1-6 Years", size(2.7) ring(0) bcolor(white %100) box color(black) l`c' lw(thick) linegap(2) margin(b+1 t+1 l+4) bmargin(l+4) pos(11))
+xlab(1(0.5)6, labsize(small) grid glw(medthin) glc(gs8))
+xmtick(1(0.0833)6, grid glw(vthin) glc(gs14))
+ylab(12(1)24, labsize(small) angle(0) grid glw(thin) glc(gs10) gextend)
+ytick(12.5(1)23.5, grid glw(thin) glc(gs10) gextend)
+ymtick(12(0.1)24, grid glw(vthin) glc(gs14) gextend)
+xscale(range(1 6) noextend)
+yscale(range(11.8 24.2))
+legend(off)
+
+text(20.77 5.8 "98", size(1.8) bcolor(white))
+text(18.47 5.8 "95", size(1.8) bcolor(white))
+text(17.65 5.8 "90", size(1.8) bcolor(white))
+text(16.52 5.8 "75", size(1.8) bcolor(white))
+text(15.6 5.8 "50", size(1.8) bcolor(white))
+text(14.8 5.8 "25", size(1.8) bcolor(white))
+text(14.25 5.8 "10", size(1.8) bcolor(white))
+text(13.9 5.8 "5", size(1.8) bcolor(white))
+text(13.62 5.8 "2", size(1.8) bcolor(white))
+
+text(12 6.06 "12", size(1.5) bcolor(white))
+text(13 6.06 "13", size(1.5) bcolor(white))
+text(14 6.06 "14", size(1.5) bcolor(white))
+text(15 6.06 "15", size(1.5) bcolor(white))
+text(16 6.06 "16", size(1.5) bcolor(white))
+text(17 6.06 "17", size(1.5) bcolor(white))
+text(18 6.06 "18", size(1.5) bcolor(white))
+text(19 6.06 "19", size(1.5) bcolor(white))
+text(20 6.06 "20", size(1.5) bcolor(white))
+text(21 6.07 "21", size(1.5) bcolor(white))
+text(22 6.07 "22", size(1.5) bcolor(white))
+text(23 6.07 "23", size(1.5) bcolor(white))
+text(24 6.07 "24", size(1.5) bcolor(white))
+
+
+plotregion(margin(zero))
+plotregion(lstyle(none))
+graphregion(margin(l r+2))
+
+xsize(8.5) ysize(11)
+
+;
+graph export print-bmi-boys-gradual-1-6y.pdf, replace
+;
+#delimit cr
+
+*/	
+	
+	
+***GIRLS PRINT BMI 2-20 Years
+/*
+use gradual_graph_p, clear
+set scheme s1mono
+
+local s (line g_f_bmi
+local ag if ag3==1
+local e lw (medthick))
+local c color("216 27 96")
+
+#delimit ;
+sort ageyears;
+twoway
+
+`s'_z2neg ay `ag', lc("30 136 229") `e'
+`s'_p5 ay `ag', lc("216 27 96")  `e'
+`s'_p10 ay `ag', lc("0 77 64"*0.6)  `e'
+`s'_p25 ay `ag', lc("255 140 0"*1.6)  `e'
+`s'_p50 ay `ag', lc(black) `e'
+`s'_p75 ay `ag', lc("255 140 0"*1.6)  `e'
+`s'_p90 ay `ag', lc("0 77 64"*0.6) `e'
+`s'_p95 ay `ag', lc("216 27 96")  `e'
+`s'_z2 ay `ag', lc("30 136 229")  `e'
+
+,
+
+xtitle("Age (Years)", size(small) `c' )
+ytitle("Body Mass Index (kg/m{superscript: 2})", size(small) `c' )
+title("{bf:Girls          BMI-for-Age}"  "Gradual WHO-CDC  2-20 Years", size(2.7) ring(0) bcolor(white %100) box color(black) l`c' lw(thick) linegap(2) margin(b+1 t+1 l+4) bmargin(l+4) pos(11))
+xlab(2(1)20, labsize(small) grid glw(medthin) glc(gs8))
+xmtick(2(0.5)20, grid glw(vthin) glc(gs14))
+ylab(12(1)43, labsize(small) angle(0) grid glw(thin) glc(gs10) gextend)
+ymtick(12(0.2)43.2, grid glw(vthin) glc(gs14) gextend)
+xscale(range(2 20) noextend)
+yscale(range(11.8 43.2))
+legend(off)
+
+text(37.77 19.6 "98", size(1.8) bcolor(white))
+text(31.95 19.6 "95", size(1.8) bcolor(white))
+text(28.48 19.6 "90", size(1.8) bcolor(white))
+text(24.72 19.6 "75", size(1.8) bcolor(white))
+text(22.27 19.6 "50", size(1.8) bcolor(white))
+text(20.6 19.6 "25", size(1.8) bcolor(white))
+text(18.85 19.6 "10", size(1.8) bcolor(white))
+text(18.14 19.6 "5", size(1.8) bcolor(white))
+text(17.53 19.6 "2", size(1.8) bcolor(white))
+
+text(12 20.3 "12", size(1.5) bcolor(white))
+text(13 20.3 "13", size(1.5) bcolor(white))
+text(14 20.3 "14", size(1.5) bcolor(white))
+text(15 20.3 "15", size(1.5) bcolor(white))
+text(16 20.3 "16", size(1.5) bcolor(white))
+text(17 20.3 "17", size(1.5) bcolor(white))
+text(18 20.3 "18", size(1.5) bcolor(white))
+text(19 20.3 "19", size(1.5) bcolor(white))
+text(20 20.3 "20", size(1.5) bcolor(white))
+text(21 20.3 "21", size(1.5) bcolor(white))
+text(22 20.3 "22", size(1.5) bcolor(white))
+text(23 20.3 "23", size(1.5) bcolor(white))
+text(24 20.3 "24", size(1.5) bcolor(white))
+text(25 20.3 "25", size(1.5) bcolor(white))
+text(26 20.3 "26", size(1.5) bcolor(white))
+text(27 20.3 "27", size(1.5) bcolor(white))
+text(28 20.3 "28", size(1.5) bcolor(white))
+text(29 20.3 "29", size(1.5) bcolor(white))
+text(30 20.3 "30", size(1.5) bcolor(white))
+text(31 20.3 "31", size(1.5) bcolor(white))
+text(32 20.3 "32", size(1.5) bcolor(white))
+text(33 20.3 "33", size(1.5) bcolor(white))
+text(34 20.3 "34", size(1.5) bcolor(white))
+text(35 20.3 "35", size(1.5) bcolor(white))
+text(36 20.3 "36", size(1.5) bcolor(white))
+text(37 20.3 "37", size(1.5) bcolor(white))
+text(38 20.3 "38", size(1.5) bcolor(white))
+text(39 20.3 "39", size(1.5) bcolor(white))
+text(40 20.3 "40", size(1.5) bcolor(white))
+text(41 20.3 "41", size(1.5) bcolor(white))
+text(42 20.3 "42", size(1.5) bcolor(white))
+text(43 20.3 "43", size(1.5) bcolor(white))
+
+
+plotregion(margin(zero))
+plotregion(lstyle(none))
+graphregion(margin(l r+2))
+
+xsize(8.5) ysize(11)
+
+;
+graph export print-bmi-girls-gradual-2-20y.pdf, replace
+;
+#delimit cr
+
+*/	
+	
+	
+	
+***BOYS PRINT BMI 2-20 Years
+/*
+use gradual_graph_p, clear
+set scheme s1mono
+
+local s (line g_m_bmi
+local ag if ag3==1
+local e lw (medthick))
+local c color("30 136 229")
+
+#delimit ;
+sort ageyears;
+twoway
+
+`s'_z2neg ay `ag', lc("30 136 229") `e'
+`s'_p5 ay `ag', lc("216 27 96")  `e'
+`s'_p10 ay `ag', lc("0 77 64"*0.6)  `e'
+`s'_p25 ay `ag', lc("255 140 0"*1.6)  `e'
+`s'_p50 ay `ag', lc(black) `e'
+`s'_p75 ay `ag', lc("255 140 0"*1.6)  `e'
+`s'_p90 ay `ag', lc("0 77 64"*0.6) `e'
+`s'_p95 ay `ag', lc("216 27 96")  `e'
+`s'_z2 ay `ag', lc("30 136 229")  `e'
+
+,
+
+xtitle("Age (Years)", size(small) `c' )
+ytitle("Body Mass Index (kg/m{superscript: 2})", size(small) `c' )
+title("{bf:Boys            BMI-for-Age}"  "Gradual WHO-CDC  2-20 Years", size(2.7) ring(0) bcolor(white %100) box color(black) l`c' lw(thick) linegap(2) margin(b+1 t+1 l+4) bmargin(l+4) pos(11))
+xlab(2(1)20, labsize(small) grid glw(medthin) glc(gs8))
+xmtick(2(0.5)20, grid glw(vthin) glc(gs14))
+ylab(12(1)43, labsize(small) angle(0) grid glw(thin) glc(gs10) gextend)
+ymtick(12(0.2)43.2, grid glw(vthin) glc(gs14) gextend)
+xscale(range(2 20) noextend)
+yscale(range(11.8 43.2))
+legend(off)
+
+text(36.04 19.6 "98", size(1.8) bcolor(white))
+text(30.87 19.6 "95", size(1.8) bcolor(white))
+text(28.55 19.6 "90", size(1.8) bcolor(white))
+text(25.77 19.6 "75", size(1.8) bcolor(white))
+text(23.26 19.6 "50", size(1.8) bcolor(white))
+text(21.33 19.6 "25", size(1.8) bcolor(white))
+text(20.1 19.6 "10", size(1.8) bcolor(white))
+text(19.3 19.6 "5", size(1.8) bcolor(white))
+text(18.67 19.6 "2", size(1.8) bcolor(white))
+
+text(12 20.3 "12", size(1.5) bcolor(white))
+text(13 20.3 "13", size(1.5) bcolor(white))
+text(14 20.3 "14", size(1.5) bcolor(white))
+text(15 20.3 "15", size(1.5) bcolor(white))
+text(16 20.3 "16", size(1.5) bcolor(white))
+text(17 20.3 "17", size(1.5) bcolor(white))
+text(18 20.3 "18", size(1.5) bcolor(white))
+text(19 20.3 "19", size(1.5) bcolor(white))
+text(20 20.3 "20", size(1.5) bcolor(white))
+text(21 20.3 "21", size(1.5) bcolor(white))
+text(22 20.3 "22", size(1.5) bcolor(white))
+text(23 20.3 "23", size(1.5) bcolor(white))
+text(24 20.3 "24", size(1.5) bcolor(white))
+text(25 20.3 "25", size(1.5) bcolor(white))
+text(26 20.3 "26", size(1.5) bcolor(white))
+text(27 20.3 "27", size(1.5) bcolor(white))
+text(28 20.3 "28", size(1.5) bcolor(white))
+text(29 20.3 "29", size(1.5) bcolor(white))
+text(30 20.3 "30", size(1.5) bcolor(white))
+text(31 20.3 "31", size(1.5) bcolor(white))
+text(32 20.3 "32", size(1.5) bcolor(white))
+text(33 20.3 "33", size(1.5) bcolor(white))
+text(34 20.3 "34", size(1.5) bcolor(white))
+text(35 20.3 "35", size(1.5) bcolor(white))
+text(36 20.3 "36", size(1.5) bcolor(white))
+text(37 20.3 "37", size(1.5) bcolor(white))
+text(38 20.3 "38", size(1.5) bcolor(white))
+text(39 20.3 "39", size(1.5) bcolor(white))
+text(40 20.3 "40", size(1.5) bcolor(white))
+text(41 20.3 "41", size(1.5) bcolor(white))
+text(42 20.3 "42", size(1.5) bcolor(white))
+text(43 20.3 "43", size(1.5) bcolor(white))
+
+
+plotregion(margin(zero))
+plotregion(lstyle(none))
+graphregion(margin(l r+2))
+
+xsize(8.5) ysize(11)
+
+;
+graph export print-bmi-boys-gradual-2-20y.pdf, replace
+;
+#delimit cr
+
+*/	
+
+
+*Extra info
+
+	
+/* 
+Will have someone place this text on charts manually in very final version, along with information about citation and date
+
+text(23.95 1.03 "The vertical rise" "at age 2 years" "is due to the" "transition from" "length to height" "measurements", placement(seast) bcolor(white) box size(1.1) justification(left))
+*/
+
+
+
