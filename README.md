@@ -1,3 +1,5 @@
+**Updated 2025-09-29** <br />
+
 # gradual-who-cdc
 **Description**: Growth charts that gradually transition from WHO to CDC values from 2 to 5 years. Files available for download: printable charts and tables as well as data tables, code and further instructions for implementation.
 
@@ -18,9 +20,11 @@ This repository contains:
 -Selected percentiles are available by month for 2-5 years, the ages for which the gradual charts differ from both the WHO and CDC charts.<br />
 
 **Data tables, code, and instructions for analysis and EHR integration**<br />
+**Updated 2025-09-29** The original .csv files mistakenly included gradual LMS files. These were accidentally created when merging major percentile line values. The LMS values for WHO and CDC should not be merged. The updated .csv files from 2025-09-29 do not contain these erroneous values. <br />
 -The data tables are compressed .csv files. The file names are datatable-gradual-months and datatable-gradual-days. <br />
 -See separate documents titled further-info-gradual-[date] and equation-gradual.pdf for further information about the tables, code, and implementation.<br />
 -A short R function and Stata do-file are provided that will create gradual z-scores from WHO and CDC z-scores.<br />
+
 
 The files are available for download and may be used in clinical care and research, including integration into EHRs. 
 
